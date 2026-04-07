@@ -1,6 +1,6 @@
 services:
-  tprox:
-    image: ghcr.io/sonroyaalmerol/m3u-stream-merger-proxy:latest
+  windows-m3u-stream-merger-proxy:
+    image: ghcr.io/<your-github-username>/windows-m3u-stream-merger-proxy:latest
     container_name: YOUR_CONTAINER_NAME
     hostname: YOUR_CONTAINERS_HOSTNAME
     environment:
@@ -21,3 +21,4 @@ services:
     ports:
       - YOUR_PORT:8080
     restart: unless-stopped
+

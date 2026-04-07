@@ -6,8 +6,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"m3u-stream-merger/config"
-	"m3u-stream-merger/logger"
+	"windows-m3u-stream-merger-proxy/config"
+	"windows-m3u-stream-merger-proxy/logger"
 
 	"github.com/goccy/go-json"
 	"golang.org/x/crypto/sha3"
@@ -59,3 +59,4 @@ func DecodeSlug(slug string) (*StreamInfo, error) {
 
 	return &info, nil
 }
+

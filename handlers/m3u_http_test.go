@@ -2,9 +2,9 @@ package handlers
 
 import (
 	"context"
-	"m3u-stream-merger/config"
-	"m3u-stream-merger/logger"
-	"m3u-stream-merger/sourceproc"
+	"windows-m3u-stream-merger-proxy/config"
+	"windows-m3u-stream-merger-proxy/logger"
+	"windows-m3u-stream-merger-proxy/sourceproc"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -214,3 +214,4 @@ func TestM3UHTTPHandler_Headers(t *testing.T) {
 		}
 	}
 }
+

@@ -2,7 +2,7 @@ package store
 
 import (
 	"fmt"
-	"m3u-stream-merger/logger"
+	"windows-m3u-stream-merger-proxy/logger"
 	"os"
 	"strconv"
 	"sync/atomic"
@@ -105,3 +105,4 @@ func (cm *ConcurrencyManager) GetCount(m3uIndex string) int {
 	}
 	return 0
 }
+

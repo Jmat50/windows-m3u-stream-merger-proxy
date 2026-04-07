@@ -11,8 +11,9 @@ if ! id -u appuser > /dev/null 2>&1; then
 fi
 
 # Change ownership of the app directory
-chown -R appuser:appgroup /m3u-proxy
+chown -R appuser:appgroup /windows-m3u-stream-merger-proxy
 
 # Switch to the new user and execute the main application
 exec su-exec appuser "$@"
+
 

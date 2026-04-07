@@ -2,7 +2,7 @@ package utils
 
 import (
 	"fmt"
-	"m3u-stream-merger/config"
+	"windows-m3u-stream-merger-proxy/config"
 	"path/filepath"
 )
 
@@ -21,3 +21,4 @@ func GetAllM3UFilePaths() []string {
 
 	return paths
 }
+

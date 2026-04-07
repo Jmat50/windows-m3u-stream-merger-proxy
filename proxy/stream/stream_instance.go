@@ -3,15 +3,15 @@ package stream
 import (
 	"context"
 	"fmt"
-	"m3u-stream-merger/logger"
-	"m3u-stream-merger/proxy"
-	"m3u-stream-merger/proxy/client"
-	"m3u-stream-merger/proxy/loadbalancer"
-	"m3u-stream-merger/proxy/stream/buffer"
-	"m3u-stream-merger/proxy/stream/config"
-	"m3u-stream-merger/proxy/stream/failovers"
-	"m3u-stream-merger/store"
-	"m3u-stream-merger/utils"
+	"windows-m3u-stream-merger-proxy/logger"
+	"windows-m3u-stream-merger-proxy/proxy"
+	"windows-m3u-stream-merger-proxy/proxy/client"
+	"windows-m3u-stream-merger-proxy/proxy/loadbalancer"
+	"windows-m3u-stream-merger-proxy/proxy/stream/buffer"
+	"windows-m3u-stream-merger-proxy/proxy/stream/config"
+	"windows-m3u-stream-merger-proxy/proxy/stream/failovers"
+	"windows-m3u-stream-merger-proxy/store"
+	"windows-m3u-stream-merger-proxy/utils"
 	"strings"
 )
 
@@ -68,6 +68,7 @@ func (instance *StreamInstance) ProxyStream(
 
 	var result StreamResult
 	if lbResult.Response.StatusCode == 206 || strings.HasSuffix(lbResult.URL, ".mp4") {
+		coordinator.FinishWriterSetup()
 		handler.logger.Logf("VOD request detected from: %s", streamClient.Request.RemoteAddr)
 		handler.logger.Warn("VODs do not support shared buffer.")
 		result = handler.HandleDirectStream(ctx, lbResult, streamClient)
@@ -87,6 +88,7 @@ func (instance *StreamInstance) ProxyStream(
 	}
 
 	if result.Status == proxy.StatusIncompatible && utils.IsAnM3U8Media(lbResult.Response) {
+		coordinator.FinishWriterSetup()
 		if _, ok := instance.Cm.Invalid.Load(lbResult.URL); !ok {
 			instance.logger.Logf("Source is known to have an incompatible media type for an M3U8. Trying a fallback passthrough method.")
 			instance.logger.Logf("Passthrough method will not have any shared buffer. Concurrency support might be unreliable.")
@@ -108,3 +110,4 @@ func (instance *StreamInstance) ProxyStream(
 
 	statusChan <- result.Status
 }
+

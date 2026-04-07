@@ -15,9 +15,10 @@ import (
 	"testing"
 	"time"
 
-	"m3u-stream-merger/config"
-	"m3u-stream-merger/utils"
+	"windows-m3u-stream-merger-proxy/config"
+	"windows-m3u-stream-merger-proxy/utils"
 
+	"github.com/puzpuzpuz/xsync/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -537,3 +538,74 @@ func TestMergeAttributesToM3UFile(t *testing.T) {
 	assert.Contains(t, contentStr, `tvg-type="type-2"`, "Should contain tvg-type from merged attributes")
 	assert.Contains(t, contentStr, `tvg-logo="http://example.com/a/aHR0cDovL2xvZ28vc291cmNlNC5wbmc="`, "Should contain tvg-logo from merged attributes")
 }
+
+func TestSortingManager_DedupesCanonicalChannelAcrossCaseAndSpacing(t *testing.T) {
+	cleanup := setupTestEnvironment(t)
+	defer cleanup()
+
+	manager := newSortingManager()
+	defer manager.Close()
+
+	makeStream := func(title, sourceM3U, urlKey, url string, index int) *StreamInfo {
+		stream := &StreamInfo{
+			Title:       title,
+			SourceM3U:   sourceM3U,
+			SourceIndex: index,
+			URLs:        xsync.NewMapOf[string, map[string]string](),
+		}
+		stream.URLs.Store(sourceM3U, map[string]string{urlKey: fmt.Sprintf("%d:::%s", index, url)})
+		return stream
+	}
+
+	first := makeStream("A & E", "1", "hash1", "http://example.com/aande-1", 1)
+	second := makeStream("a&e", "2", "hash2", "http://example.com/aande-2", 2)
+
+	require.NoError(t, manager.AddToSorter(first))
+	require.NoError(t, manager.AddToSorter(second))
+
+	var entries []*StreamInfo
+	require.NoError(t, manager.GetSortedEntries(func(stream *StreamInfo) {
+		entries = append(entries, stream)
+	}))
+
+	require.Len(t, entries, 1, "Canonical title variants should merge into one channel entry")
+	assert.Equal(t, "1", entries[0].SourceM3U, "Merged channel should keep the first source as primary")
+}
+
+func TestSortingManager_MergesAttributesForDuplicateChannelBeforeFlush(t *testing.T) {
+	cleanup := setupTestEnvironment(t)
+	defer cleanup()
+
+	manager := newSortingManager()
+	defer manager.Close()
+
+	makeStream := func(title, sourceM3U, tvgID, group, urlKey, url string, index int) *StreamInfo {
+		stream := &StreamInfo{
+			Title:       title,
+			TvgID:       tvgID,
+			Group:       group,
+			SourceM3U:   sourceM3U,
+			SourceIndex: index,
+			URLs:        xsync.NewMapOf[string, map[string]string](),
+		}
+		stream.URLs.Store(sourceM3U, map[string]string{urlKey: fmt.Sprintf("%d:::%s", index, url)})
+		return stream
+	}
+
+	first := makeStream("Discovery Channel", "1", "", "", "hash1", "http://example.com/discovery-a", 10)
+	second := makeStream("Discovery Channel", "2", "discovery.2", "Documentary", "hash2", "http://example.com/discovery-b", 20)
+
+	require.NoError(t, manager.AddToSorter(first))
+	require.NoError(t, manager.AddToSorter(second))
+
+	var entries []*StreamInfo
+	require.NoError(t, manager.GetSortedEntries(func(stream *StreamInfo) {
+		entries = append(entries, stream)
+	}))
+
+	require.Len(t, entries, 1, "Duplicate channel titles should collapse into one playlist entry")
+	assert.Equal(t, "1", entries[0].SourceM3U, "Merged channel should keep the earliest source as primary")
+	assert.Equal(t, "discovery.2", entries[0].TvgID, "Merged channel should retain attributes contributed by later duplicates")
+	assert.Equal(t, "Documentary", entries[0].Group, "Merged channel should keep missing metadata filled from duplicates")
+}
+

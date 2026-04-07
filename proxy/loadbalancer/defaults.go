@@ -1,8 +1,8 @@
 package loadbalancer
 
 import (
-	"m3u-stream-merger/sourceproc"
-	"m3u-stream-merger/utils"
+	"windows-m3u-stream-merger-proxy/sourceproc"
+	"windows-m3u-stream-merger-proxy/utils"
 )
 
 type DefaultIndexProvider struct {
@@ -20,3 +20,4 @@ type DefaultSlugParser struct {
 func (p *DefaultSlugParser) GetStreamBySlug(slug string) (*sourceproc.StreamInfo, error) {
 	return sourceproc.GetStreamBySlug(slug)
 }
+

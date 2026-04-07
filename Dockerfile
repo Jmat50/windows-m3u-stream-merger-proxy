@@ -14,7 +14,7 @@ RUN go mod download
 COPY . .
 
 # test and build the app.
-RUN go test -timeout=30s ./... && go build -ldflags='-s -w' -o m3u-proxy .
+RUN go test -timeout=30s ./... && go build -ldflags='-s -w' -o windows-m3u-stream-merger-proxy .
 
 # End from the latest alpine image
 # hadolint ignore=DL3007
@@ -28,16 +28,16 @@ RUN apk --no-cache add tzdata \
   && update-ca-certificates
 
 # set the current workdir
-WORKDIR /m3u-proxy
+WORKDIR /windows-m3u-stream-merger-proxy
 
 # copy in our compiled GO app
-COPY --from=build /app/m3u-proxy /m3u-proxy/
+COPY --from=build /app/windows-m3u-stream-merger-proxy /windows-m3u-stream-merger-proxy/
 
 # Copy the entrypoint script
-COPY entrypoint.sh /m3u-proxy/entrypoint.sh
+COPY entrypoint.sh /windows-m3u-stream-merger-proxy/entrypoint.sh
 
 # Make the entrypoint script executable
-RUN chmod +x /m3u-proxy/entrypoint.sh
+RUN chmod +x /windows-m3u-stream-merger-proxy/entrypoint.sh
 
 # Set PUID and PGID as environment variables
 ENV PUID=1000
@@ -48,4 +48,5 @@ ENV MINIMUM_THROUGHPUT=100000
 ENV PORT=8080
 
 # The container entrypoint
-ENTRYPOINT ["/m3u-proxy/entrypoint.sh", "/m3u-proxy/m3u-proxy"]
+ENTRYPOINT ["/windows-m3u-stream-merger-proxy/entrypoint.sh", "/windows-m3u-stream-merger-proxy/windows-m3u-stream-merger-proxy"]
+

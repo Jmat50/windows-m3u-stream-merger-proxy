@@ -12,9 +12,9 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"m3u-stream-merger/config"
-	"m3u-stream-merger/logger"
-	"m3u-stream-merger/utils"
+	"windows-m3u-stream-merger-proxy/config"
+	"windows-m3u-stream-merger-proxy/logger"
+	"windows-m3u-stream-merger-proxy/utils"
 )
 
 type M3UProcessor struct {
@@ -319,3 +319,4 @@ func createResultFile(path string) (*os.File, error) {
 	}
 	return os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
 }
+

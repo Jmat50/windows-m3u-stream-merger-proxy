@@ -14,8 +14,25 @@ type Config struct {
 }
 
 var globalConfig = &Config{
-	DataPath: "/m3u-proxy/data/",
-	TempPath: "/tmp/m3u-proxy/",
+	DataPath: "/windows-m3u-stream-merger-proxy/data/",
+	TempPath: "/tmp/windows-m3u-stream-merger-proxy/",
+}
+
+func InitFromEnv() {
+	dataPath := strings.TrimSpace(os.Getenv("DATA_PATH"))
+	tempPath := strings.TrimSpace(os.Getenv("TEMP_PATH"))
+
+	if dataPath == "" {
+		dataPath = globalConfig.DataPath
+	}
+	if tempPath == "" {
+		tempPath = globalConfig.TempPath
+	}
+
+	SetConfig(&Config{
+		DataPath: dataPath,
+		TempPath: tempPath,
+	})
 }
 
 func GetConfig() *Config {
@@ -51,17 +68,20 @@ func GetLatestProcessedM3UPath() (string, error) {
 
 	var validFiles []os.DirEntry
 	for _, file := range files {
+		if file.IsDir() {
+			continue
+		}
 		if strings.HasSuffix(file.Name(), ".tmp") {
 			continue
 		}
 		validFiles = append(validFiles, file)
 	}
 
-	if len(files) == 0 {
-		return "", fmt.Errorf("no files found in directory")
+	if len(validFiles) == 0 {
+		return "", fmt.Errorf("no processed m3u files found in directory")
 	}
 
-	return validFiles[len(files)-1].Name(), nil
+	return filepath.Join(dir, validFiles[len(validFiles)-1].Name()), nil
 }
 
 func GetNewM3UPath() string {
@@ -109,3 +129,4 @@ func GetSourcesDirPath() string {
 func GetSortDirPath() string {
 	return filepath.Join(globalConfig.TempPath, "sorter/")
 }
+

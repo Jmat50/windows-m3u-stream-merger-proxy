@@ -6,8 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"m3u-stream-merger/logger"
-	"m3u-stream-merger/utils"
+	"windows-m3u-stream-merger-proxy/logger"
+	"windows-m3u-stream-merger-proxy/utils"
 	"sync"
 
 	"github.com/klauspost/compress/zstd"
@@ -110,3 +110,4 @@ func ParseSegmentId(id string) (*M3U8Segment, error) {
 
 	return initInfo, nil
 }
+

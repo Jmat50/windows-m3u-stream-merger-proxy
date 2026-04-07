@@ -1,9 +1,9 @@
 package buffer
 
 import (
-	"m3u-stream-merger/logger"
-	"m3u-stream-merger/proxy/stream/config"
-	"m3u-stream-merger/store"
+	"windows-m3u-stream-merger-proxy/logger"
+	"windows-m3u-stream-merger-proxy/proxy/stream/config"
+	"windows-m3u-stream-merger-proxy/store"
 	"sync/atomic"
 	"time"
 
@@ -105,3 +105,4 @@ func (r *StreamRegistry) Shutdown() {
 	close(r.done)
 	r.coordinators.Clear()
 }
+

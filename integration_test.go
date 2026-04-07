@@ -12,10 +12,10 @@ import (
 	"testing"
 	"time"
 
-	"m3u-stream-merger/config"
-	"m3u-stream-merger/handlers"
-	"m3u-stream-merger/logger"
-	"m3u-stream-merger/sourceproc"
+	"windows-m3u-stream-merger-proxy/config"
+	"windows-m3u-stream-merger-proxy/handlers"
+	"windows-m3u-stream-merger-proxy/logger"
+	"windows-m3u-stream-merger-proxy/sourceproc"
 )
 
 // responseWriterPiper implements http.ResponseWriter and pipes the body to an io.PipeWriter.
@@ -212,3 +212,4 @@ func TestStreamHTTPHandler(t *testing.T) {
 		t.Error("No streams passed the test")
 	}
 }
+

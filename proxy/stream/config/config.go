@@ -19,7 +19,7 @@ func NewDefaultStreamConfig() *StreamConfig {
 	finalBufferSize := 8
 	finalTimeoutSeconds := 3
 	finalMaxRetries := 5
-	finalExpectedThroughput := int64(0)
+	finalExpectedThroughput := int64(100000)
 
 	maxRetries, ok := os.LookupEnv("MAX_RETRIES")
 	if ok {

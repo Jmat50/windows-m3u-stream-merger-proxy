@@ -3,14 +3,15 @@ package sourceproc
 import (
 	"encoding/base64"
 	"fmt"
-	"m3u-stream-merger/config"
-	"m3u-stream-merger/logger"
-	"m3u-stream-merger/utils"
+	"windows-m3u-stream-merger-proxy/config"
+	"windows-m3u-stream-merger-proxy/logger"
+	"windows-m3u-stream-merger-proxy/utils"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
+	"unicode"
 
 	"github.com/puzpuzpuz/xsync/v3"
 )
@@ -19,11 +20,22 @@ var (
 	filterOnce     sync.Once
 	includeRegexes [][]*regexp.Regexp
 	excludeRegexes [][]*regexp.Regexp
+	channelRules   []channelSourceRule
+	channelMerges  map[string]string
 )
+
+type channelSourceRule struct {
+	titleRegex    *regexp.Regexp
+	sourceIndexes map[string]struct{}
+}
 
 // checkFilter checks if a stream matches the configured filters
 func checkFilter(stream *StreamInfo) bool {
 	filterOnce.Do(initFilters)
+
+	if !matchChannelSourceRule(stream) {
+		return false
+	}
 
 	if allFiltersEmpty() {
 		return true
@@ -54,6 +66,9 @@ func initFilters() {
 		compileRegexes(includeGroups),
 		compileRegexes(includeTitle),
 	}
+
+	channelRules = parseChannelSourceRules(utils.GetFilters("CHANNEL_SOURCES"))
+	channelMerges = parseChannelMergeRules(utils.GetFilters("CHANNEL_MERGE"))
 }
 
 func ParseStreamInfoBySlug(slug string) (*StreamInfo, error) {
@@ -96,23 +111,46 @@ func ParseStreamInfoBySlug(slug string) (*StreamInfo, error) {
 }
 
 func loadStreamURLs(stream *StreamInfo, m3uIndex string) error {
-	safeTitle := base64.StdEncoding.EncodeToString([]byte(stream.Title))
+	// New format uses URL-safe base64 title and "__" delimiter (Windows-safe).
+	safeTitle := base64.RawURLEncoding.EncodeToString([]byte(stream.Title))
 	fileName := fmt.Sprintf("%s_%s*", safeTitle, m3uIndex)
-	// Search across all shard directories
-	globPattern := filepath.Join(config.GetStreamsDirPath(), "*", fileName)
+	globPatterns := []string{filepath.Join(config.GetStreamsDirPath(), "*", fileName)}
 
-	fileMatches, err := filepath.Glob(globPattern)
-	if err != nil {
-		return fmt.Errorf("error finding files for pattern %s: %v", globPattern, err)
+	// Backward-compatible fallback for legacy files that used StdEncoding.
+	legacySafeTitle := base64.StdEncoding.EncodeToString([]byte(stream.Title))
+	if legacySafeTitle != safeTitle {
+		legacyFileName := fmt.Sprintf("%s_%s*", legacySafeTitle, m3uIndex)
+		globPatterns = append(globPatterns, filepath.Join(config.GetStreamsDirPath(), "*", legacyFileName))
+	}
+
+	fileMatches := make([]string, 0, 8)
+	seenMatches := make(map[string]struct{})
+	for _, globPattern := range globPatterns {
+		matches, err := filepath.Glob(globPattern)
+		if err != nil {
+			return fmt.Errorf("error finding files for pattern %s: %v", globPattern, err)
+		}
+		for _, match := range matches {
+			if _, exists := seenMatches[match]; exists {
+				continue
+			}
+			seenMatches[match] = struct{}{}
+			fileMatches = append(fileMatches, match)
+		}
 	}
 
 	stream.URLs.Store(m3uIndex, make(map[string]string))
 
 	for _, fileMatch := range fileMatches {
-		// Extract filename from path (works with sharded structure)
+		// Extract filename from path (works with sharded structure).
 		fileNameSplit := filepath.Base(fileMatch)
-		parts := strings.Split(fileNameSplit, "|")
-		if len(parts) != 2 {
+		subIndex := ""
+		if parts := strings.SplitN(fileNameSplit, "__", 2); len(parts) == 2 {
+			subIndex = parts[1]
+		} else if parts := strings.SplitN(fileNameSplit, "|", 2); len(parts) == 2 {
+			subIndex = parts[1]
+		}
+		if subIndex == "" {
 			continue
 		}
 
@@ -140,7 +178,7 @@ func loadStreamURLs(stream *StreamInfo, m3uIndex string) error {
 			if oldValue == nil {
 				oldValue = make(map[string]string)
 			}
-			oldValue[parts[1]] = strings.TrimSpace(fmt.Sprintf("%s:::%s", urlIndex, string(url)))
+			oldValue[subIndex] = strings.TrimSpace(fmt.Sprintf("%s:::%s", urlIndex, string(url)))
 			return oldValue, false
 		})
 	}
@@ -159,6 +197,159 @@ func compileRegexes(filters []string) []*regexp.Regexp {
 		regexes = append(regexes, re)
 	}
 	return regexes
+}
+
+func parseChannelSourceRules(rawRules []string) []channelSourceRule {
+	rules := make([]channelSourceRule, 0, len(rawRules))
+	for _, raw := range rawRules {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
+			continue
+		}
+
+		parts := strings.SplitN(trimmed, "|", 2)
+		if len(parts) != 2 {
+			logger.Default.Debugf("Invalid CHANNEL_SOURCES rule format: %s", trimmed)
+			continue
+		}
+
+		pattern := strings.TrimSpace(parts[0])
+		sourcesRaw := strings.TrimSpace(parts[1])
+		if pattern == "" || sourcesRaw == "" {
+			logger.Default.Debugf("Invalid CHANNEL_SOURCES rule: %s", trimmed)
+			continue
+		}
+
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			logger.Default.Debugf("Error compiling CHANNEL_SOURCES regex %s: %v", pattern, err)
+			continue
+		}
+
+		sourceIndexes := make(map[string]struct{})
+		for _, index := range strings.Split(sourcesRaw, ",") {
+			source := strings.TrimSpace(index)
+			if source == "" {
+				continue
+			}
+			sourceIndexes[source] = struct{}{}
+		}
+
+		if len(sourceIndexes) == 0 {
+			logger.Default.Debugf("No valid source indexes in CHANNEL_SOURCES rule: %s", trimmed)
+			continue
+		}
+
+		rules = append(rules, channelSourceRule{
+			titleRegex:    re,
+			sourceIndexes: sourceIndexes,
+		})
+	}
+	return rules
+}
+
+func parseChannelMergeRules(rawRules []string) map[string]string {
+	merges := make(map[string]string)
+	for _, raw := range rawRules {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
+			continue
+		}
+
+		parts := strings.SplitN(trimmed, "|", 2)
+		if len(parts) != 2 {
+			logger.Default.Debugf("Invalid CHANNEL_MERGE rule format: %s", trimmed)
+			continue
+		}
+
+		source := strings.TrimSpace(parts[0])
+		target := strings.TrimSpace(parts[1])
+		if source == "" || target == "" {
+			logger.Default.Debugf("Invalid CHANNEL_MERGE rule: %s", trimmed)
+			continue
+		}
+		if strings.EqualFold(source, target) {
+			continue
+		}
+
+		merges[normalizeChannelMergeKey(source)] = target
+	}
+	return merges
+}
+
+func applyChannelMergeRule(title string) string {
+	filterOnce.Do(initFilters)
+	current := strings.Join(strings.Fields(strings.TrimSpace(title)), " ")
+	if current == "" {
+		return title
+	}
+
+	if len(channelMerges) == 0 {
+		return current
+	}
+
+	seen := make(map[string]struct{})
+	for {
+		key := normalizeChannelMergeKey(current)
+		next, ok := channelMerges[key]
+		if !ok {
+			return current
+		}
+		if _, cycle := seen[key]; cycle {
+			logger.Default.Debugf("CHANNEL_MERGE cycle detected for title: %s", title)
+			return current
+		}
+		seen[key] = struct{}{}
+
+		next = strings.TrimSpace(next)
+		if next == "" {
+			return current
+		}
+		current = strings.Join(strings.Fields(next), " ")
+	}
+}
+
+func normalizeChannelMergeKey(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+
+	normalized := strings.ToLower(strings.Join(strings.Fields(trimmed), " "))
+	if normalized == "" {
+		return ""
+	}
+
+	var b strings.Builder
+	b.Grow(len(normalized))
+	for _, r := range normalized {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(r)
+		}
+	}
+
+	return b.String()
+}
+
+func matchChannelSourceRule(stream *StreamInfo) bool {
+	if len(channelRules) == 0 {
+		return true
+	}
+
+	hasMatch := false
+	for _, rule := range channelRules {
+		if !rule.titleRegex.MatchString(stream.Title) {
+			continue
+		}
+
+		hasMatch = true
+		if _, ok := rule.sourceIndexes[stream.SourceM3U]; ok {
+			return true
+		}
+	}
+
+	// If no rule matched this title, do not restrict it.
+	return !hasMatch
 }
 
 func matchAny(regexes []*regexp.Regexp, s string) bool {
@@ -183,3 +374,4 @@ func allFiltersEmpty() bool {
 	}
 	return true
 }
+

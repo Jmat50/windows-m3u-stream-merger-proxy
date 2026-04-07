@@ -6,13 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"m3u-stream-merger/logger"
-	"m3u-stream-merger/proxy"
-	"m3u-stream-merger/proxy/client"
-	"m3u-stream-merger/proxy/loadbalancer"
-	"m3u-stream-merger/proxy/stream/buffer"
-	"m3u-stream-merger/proxy/stream/config"
-	"m3u-stream-merger/store"
+	"windows-m3u-stream-merger-proxy/logger"
+	"windows-m3u-stream-merger-proxy/proxy"
+	"windows-m3u-stream-merger-proxy/proxy/client"
+	"windows-m3u-stream-merger-proxy/proxy/loadbalancer"
+	"windows-m3u-stream-merger-proxy/proxy/stream/buffer"
+	"windows-m3u-stream-merger-proxy/proxy/stream/config"
+	"windows-m3u-stream-merger-proxy/store"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -409,3 +409,4 @@ func TestStreamInstance_ProxyStream(t *testing.T) {
 		})
 	}
 }
+

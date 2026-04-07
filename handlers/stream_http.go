@@ -8,14 +8,16 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"sort"
 	"strings"
 	"time"
 
-	"m3u-stream-merger/logger"
-	"m3u-stream-merger/proxy"
-	"m3u-stream-merger/proxy/client"
-	"m3u-stream-merger/proxy/stream/failovers"
-	"m3u-stream-merger/utils"
+	"windows-m3u-stream-merger-proxy/logger"
+	"windows-m3u-stream-merger-proxy/proxy"
+	"windows-m3u-stream-merger-proxy/proxy/client"
+	"windows-m3u-stream-merger-proxy/proxy/loadbalancer"
+	"windows-m3u-stream-merger-proxy/proxy/stream/failovers"
+	"windows-m3u-stream-merger-proxy/utils"
 )
 
 type StreamHTTPHandler struct {
@@ -57,20 +59,58 @@ func (h *StreamHTTPHandler) handleStream(ctx context.Context, streamClient *clie
 	streamURL := h.extractStreamURL(r.URL.Path)
 	if streamURL == "" {
 		h.logger.Logf("Invalid m3uID for request from %s: %s", r.RemoteAddr, r.URL.Path)
+		h.writeStreamError(streamClient, http.StatusBadRequest, "Invalid stream identifier.")
 		return
 	}
 
 	coordinator := h.manager.GetStreamRegistry().GetOrCreateCoordinator(streamURL)
+	failedIndexes := make(map[string]struct{})
 
 	for {
 		lbResult := coordinator.GetWriterLBResult()
 		var err error
 		if lbResult == nil {
+			if !coordinator.TryStartWriterSetup() {
+				h.logger.Debugf("Writer setup already in progress for %s; waiting for shared buffer.", streamURL)
+				if waitErr := coordinator.WaitForWriterSetup(ctx); waitErr != nil {
+					h.logger.Logf("Client stopped waiting for shared buffer setup on %s: %v", streamURL, waitErr)
+					return
+				}
+				continue
+			}
+
 			h.logger.Debugf("No existing shared buffer found for %s", streamURL)
 			h.logger.Debugf("Client %s executing load balancer.", r.RemoteAddr)
-			lbResult, err = h.manager.LoadBalancer(ctx, r)
+			lbCtx := ctx
+			lbReq := r
+			if len(failedIndexes) > 0 {
+				excluded := make([]string, 0, len(failedIndexes))
+				for index := range failedIndexes {
+					excluded = append(excluded, index)
+				}
+				sort.Strings(excluded)
+				h.logger.Logf(
+					"Retrying stream %s while excluding failed sources: %s",
+					streamURL,
+					strings.Join(excluded, ", "),
+				)
+				lbCtx = loadbalancer.WithExcludedIndexes(ctx, excluded)
+				lbReq = r.Clone(lbCtx)
+			}
+
+			lbResult, err = h.manager.LoadBalancer(lbCtx, lbReq)
 			if err != nil {
+				coordinator.FinishWriterSetup()
+				if len(failedIndexes) > 0 {
+					h.logger.Warnf(
+						"Load balancer failed with source exclusions for %s. Clearing exclusions and retrying all sources once.",
+						streamURL,
+					)
+					clear(failedIndexes)
+					continue
+				}
 				h.logger.Logf("Load balancer error (%s): %v", r.URL.Path, err)
+				h.writeStreamError(streamClient, http.StatusBadGateway, fmt.Sprintf("Upstream stream selection failed: %v", err))
 				return
 			}
 		} else {
@@ -93,7 +133,16 @@ func (h *StreamHTTPHandler) handleStream(ctx context.Context, streamClient *clie
 			h.logger.Logf("Client has closed the stream: %s", r.RemoteAddr)
 			return
 		case code := <-exitStatus:
-			if h.handleExitCode(code, r) {
+			done, penalize := h.handleExitCode(code, r)
+			if penalize && lbResult != nil {
+				failedIndexes[lbResult.Index] = struct{}{}
+				h.logger.Warnf(
+					"Source M3U_%s failed during active stream for %s. Trying alternate source.",
+					lbResult.Index,
+					streamURL,
+				)
+			}
+			if done {
 				return
 			}
 			// Otherwise, retry with a new lbResult.
@@ -108,7 +157,19 @@ func (h *StreamHTTPHandler) handleStream(ctx context.Context, streamClient *clie
 	}
 }
 
-func (h *StreamHTTPHandler) handleExitCode(code int, r *http.Request) bool {
+func (h *StreamHTTPHandler) writeStreamError(streamClient *client.StreamClient, status int, message string) {
+	if streamClient == nil {
+		return
+	}
+
+	streamClient.SetHeader("Content-Type", "text/plain; charset=utf-8")
+	_ = streamClient.WriteHeader(status)
+	if message != "" {
+		_, _ = streamClient.Write([]byte(message))
+	}
+}
+
+func (h *StreamHTTPHandler) handleExitCode(code int, r *http.Request) (done bool, penalizeCurrentSource bool) {
 	switch code {
 	case proxy.StatusIncompatible:
 		h.logger.Errorf("Finished handling M3U8 %s request but failed to parse contents.",
@@ -118,19 +179,19 @@ func (h *StreamHTTPHandler) handleExitCode(code int, r *http.Request) bool {
 		fallthrough
 	case proxy.StatusServerError:
 		h.logger.Logf("Retrying other servers...")
-		return false
+		return false, true
 	case proxy.StatusM3U8Parsed:
 		h.logger.Debugf("Finished handling M3U8 %s request: %s", r.Method,
 			r.RemoteAddr)
-		return true
+		return true, false
 	case proxy.StatusM3U8ParseError:
 		h.logger.Errorf("Finished handling M3U8 %s request but failed to parse contents.",
 			r.Method, r.RemoteAddr)
-		return false
+		return false, true
 	default:
 		h.logger.Logf("Unable to write to client. Assuming stream has been closed: %s",
 			r.RemoteAddr)
-		return true
+		return true, false
 	}
 }
 
@@ -201,3 +262,4 @@ func isBrokenPipe(err error) bool {
 	return strings.Contains(err.Error(), "broken pipe") ||
 		strings.Contains(err.Error(), "connection reset by peer")
 }
+

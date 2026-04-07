@@ -5,14 +5,14 @@ import (
 	"net/http"
 	"time"
 
-	"m3u-stream-merger/logger"
-	"m3u-stream-merger/proxy"
-	"m3u-stream-merger/proxy/client"
-	"m3u-stream-merger/proxy/loadbalancer"
-	"m3u-stream-merger/proxy/stream"
-	"m3u-stream-merger/proxy/stream/buffer"
-	"m3u-stream-merger/proxy/stream/config"
-	"m3u-stream-merger/store"
+	"windows-m3u-stream-merger-proxy/logger"
+	"windows-m3u-stream-merger-proxy/proxy"
+	"windows-m3u-stream-merger-proxy/proxy/client"
+	"windows-m3u-stream-merger-proxy/proxy/loadbalancer"
+	"windows-m3u-stream-merger-proxy/proxy/stream"
+	"windows-m3u-stream-merger-proxy/proxy/stream/buffer"
+	"windows-m3u-stream-merger-proxy/proxy/stream/config"
+	"windows-m3u-stream-merger-proxy/store"
 )
 
 type ProxyInstance interface {
@@ -55,6 +55,7 @@ func (sm *DefaultProxyInstance) ProxyStream(ctx context.Context, coordinator *bu
 	instance, err := stream.NewStreamInstance(sm.cm, sm.streamConfig,
 		stream.WithLogger(sm.logger))
 	if err != nil {
+		coordinator.FinishWriterSetup()
 		sm.logger.Errorf("Failed to create stream instance: %v", err)
 		exitStatus <- proxy.StatusServerError
 		return
@@ -69,3 +70,4 @@ func (sm *DefaultProxyInstance) GetConcurrencyManager() *store.ConcurrencyManage
 func (sm *DefaultProxyInstance) GetStreamRegistry() *buffer.StreamRegistry {
 	return sm.registry
 }
+

@@ -5,9 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"m3u-stream-merger/logger"
-	"m3u-stream-merger/sourceproc"
-	"m3u-stream-merger/store"
+	"windows-m3u-stream-merger-proxy/logger"
+	"windows-m3u-stream-merger-proxy/sourceproc"
+	"windows-m3u-stream-merger-proxy/store"
 	"net/http"
 	"os"
 	"sort"
@@ -288,6 +288,29 @@ func TestLoadBalancer(t *testing.T) {
 	}
 }
 
+func TestLessSourceIndex(t *testing.T) {
+	tests := []struct {
+		a    string
+		b    string
+		want bool
+	}{
+		{a: "1", b: "2", want: true},
+		{a: "10", b: "2", want: false},
+		{a: "2", b: "10", want: true},
+		{a: "x", b: "2", want: false},
+		{a: "2", b: "x", want: true},
+		{a: "a", b: "b", want: true},
+		{a: "b", b: "a", want: false},
+	}
+
+	for _, tt := range tests {
+		got := lessSourceIndex(tt.a, tt.b)
+		if got != tt.want {
+			t.Fatalf("lessSourceIndex(%q, %q) = %v, want %v", tt.a, tt.b, got, tt.want)
+		}
+	}
+}
+
 func TestLoadBalancerWithHTTPStatusCodes(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -295,6 +318,19 @@ func TestLoadBalancerWithHTTPStatusCodes(t *testing.T) {
 		expectErr   bool
 		expectedURL string
 	}{
+		{
+			name: "handles 206 partial content",
+			setupMocks: func(client *mockHTTPClient) {
+				client.responses = map[string]*http.Response{
+					"http://test1.com/stream": {
+						StatusCode: http.StatusPartialContent,
+						Body:       io.NopCloser(strings.NewReader("dummy partial content")),
+					},
+				}
+			},
+			expectErr:   false,
+			expectedURL: "http://test1.com/stream",
+		},
 		{
 			name: "handles 301 redirect",
 			setupMocks: func(client *mockHTTPClient) {
@@ -748,3 +784,4 @@ func TestLoadBalancerConcurrencyPriority(t *testing.T) {
 		})
 	}
 }
+

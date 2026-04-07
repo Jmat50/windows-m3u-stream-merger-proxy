@@ -3,6 +3,7 @@ package utils
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -41,6 +42,9 @@ func GetM3UIndexes() []string {
 				m3uIndexes = append(m3uIndexes, indexString)
 			}
 		}
+		sort.Slice(m3uIndexes, func(i, j int) bool {
+			return lessIndex(m3uIndexes[i], m3uIndexes[j])
+		})
 	})
 	return m3uIndexes
 }
@@ -65,7 +69,11 @@ func GetFilters(baseEnv string) []string {
 		return cached
 	}
 
-	var envFilters []string
+	type indexedFilter struct {
+		index int
+		value string
+	}
+	filterValues := make([]indexedFilter, 0, 16)
 	prefix := fmt.Sprintf("%s_", baseEnv)
 	for _, env := range os.Environ() {
 		pair := strings.SplitN(env, "=", 2)
@@ -73,14 +81,45 @@ func GetFilters(baseEnv string) []string {
 			// Remove the prefix (e.g. "FILTER_")
 			indexStr := strings.TrimPrefix(pair[0], prefix)
 			// Ensure the suffix is an integer.
-			if _, err := strconv.Atoi(indexStr); err != nil {
+			indexNum, err := strconv.Atoi(indexStr)
+			if err != nil {
 				continue
 			}
-			envFilters = append(envFilters, pair[1])
+			value := ""
+			if len(pair) > 1 {
+				value = pair[1]
+			}
+			filterValues = append(filterValues, indexedFilter{index: indexNum, value: value})
 		}
 	}
+
+	sort.Slice(filterValues, func(i, j int) bool {
+		return filterValues[i].index < filterValues[j].index
+	})
+
+	envFilters := make([]string, 0, len(filterValues))
+	for _, entry := range filterValues {
+		envFilters = append(envFilters, entry.value)
+	}
+
 	filters[baseEnv] = envFilters
 	return envFilters
+}
+
+func lessIndex(a, b string) bool {
+	aNum, aErr := strconv.Atoi(a)
+	bNum, bErr := strconv.Atoi(b)
+
+	if aErr == nil && bErr == nil {
+		return aNum < bNum
+	}
+	if aErr == nil {
+		return true
+	}
+	if bErr == nil {
+		return false
+	}
+	return a < b
 }
 
 func ResetCaches() {

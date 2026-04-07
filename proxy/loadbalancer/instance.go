@@ -3,15 +3,16 @@ package loadbalancer
 import (
 	"context"
 	"fmt"
-	"m3u-stream-merger/logger"
-	"m3u-stream-merger/proxy"
-	"m3u-stream-merger/sourceproc"
-	"m3u-stream-merger/store"
-	"m3u-stream-merger/utils"
+	"windows-m3u-stream-merger-proxy/logger"
+	"windows-m3u-stream-merger-proxy/proxy"
+	"windows-m3u-stream-merger-proxy/sourceproc"
+	"windows-m3u-stream-merger-proxy/store"
+	"windows-m3u-stream-merger-proxy/utils"
 	"net/http"
 	"path"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -247,6 +248,26 @@ func (instance *LoadBalancerInstance) tryAllStreams(ctx context.Context, req *ht
 	if len(m3uIndexes) == 0 {
 		return nil, fmt.Errorf("no M3U indexes available")
 	}
+	excludedIndexes := excludedIndexesFromContext(ctx)
+	if len(excludedIndexes) > 0 {
+		filteredIndexes := make([]string, 0, len(m3uIndexes))
+		for _, idx := range m3uIndexes {
+			if _, excluded := excludedIndexes[idx]; excluded {
+				continue
+			}
+			filteredIndexes = append(filteredIndexes, idx)
+		}
+
+		if len(filteredIndexes) > 0 {
+			instance.logger.Logf(
+				"Skipping source indexes for this retry: %s",
+				strings.Join(sortedIndexKeys(excludedIndexes), ", "),
+			)
+			m3uIndexes = filteredIndexes
+		} else {
+			instance.logger.Warn("All source indexes excluded for retry; falling back to full source list.")
+		}
+	}
 
 	select {
 	case <-ctx.Done():
@@ -257,7 +278,14 @@ func (instance *LoadBalancerInstance) tryAllStreams(ctx context.Context, req *ht
 
 		for len(done) < initialCount {
 			sort.Slice(m3uIndexes, func(i, j int) bool {
-				return instance.Cm.ConcurrencyPriorityValue(m3uIndexes[i]) > instance.Cm.ConcurrencyPriorityValue(m3uIndexes[j])
+				left := m3uIndexes[i]
+				right := m3uIndexes[j]
+				leftPriority := instance.Cm.ConcurrencyPriorityValue(left)
+				rightPriority := instance.Cm.ConcurrencyPriorityValue(right)
+				if leftPriority != rightPriority {
+					return leftPriority > rightPriority
+				}
+				return lessSourceIndex(left, right)
 			})
 
 			var index string
@@ -290,6 +318,37 @@ func (instance *LoadBalancerInstance) tryAllStreams(ctx context.Context, req *ht
 		}
 	}
 	return nil, fmt.Errorf("no available streams")
+}
+
+func lessSourceIndex(a, b string) bool {
+	aNum, aErr := strconv.Atoi(a)
+	bNum, bErr := strconv.Atoi(b)
+
+	if aErr == nil && bErr == nil {
+		return aNum < bNum
+	}
+	if aErr == nil {
+		return true
+	}
+	if bErr == nil {
+		return false
+	}
+	return a < b
+}
+
+func sortedIndexKeys(values map[string]struct{}) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		return lessSourceIndex(keys[i], keys[j])
+	})
+	return keys
+}
+
+func isAcceptableStreamStatus(statusCode int) bool {
+	return statusCode == http.StatusOK || statusCode == http.StatusPartialContent
 }
 
 func (instance *LoadBalancerInstance) tryStreamUrls(
@@ -393,12 +452,12 @@ func (instance *LoadBalancerInstance) tryStreamUrls(
 				resultCh <- &streamTestResult{err: fmt.Errorf("nil response")}
 				return
 			}
-			if resp.StatusCode != http.StatusOK {
-				instance.logger.Errorf("Non-200 status %d for %s %s",
+			if !isAcceptableStreamStatus(resp.StatusCode) {
+				instance.logger.Errorf("Non-success stream status %d for %s %s",
 					resp.StatusCode, req.Method, url)
 				instance.markTested(streamId, candidateId)
 				resultCh <- &streamTestResult{
-					err: fmt.Errorf("non-200 status: %d", resp.StatusCode),
+					err: fmt.Errorf("non-success stream status: %d", resp.StatusCode),
 				}
 				return
 			}
@@ -455,3 +514,4 @@ func (instance *LoadBalancerInstance) markTested(streamId string, id string) {
 func (instance *LoadBalancerInstance) clearTested(streamId string) {
 	instance.testedIndexes.Delete(streamId)
 }
+

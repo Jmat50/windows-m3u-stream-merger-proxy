@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"m3u-stream-merger/proxy"
-	"m3u-stream-merger/proxy/loadbalancer"
+	"windows-m3u-stream-merger-proxy/proxy"
+	"windows-m3u-stream-merger-proxy/proxy/loadbalancer"
 	"time"
 )
 
@@ -20,6 +20,7 @@ func (c *StreamCoordinator) StartMediaWriter(ctx context.Context, lbResult *load
 	defer lbResult.Response.Body.Close()
 
 	c.LBResultOnWrite.Store(lbResult)
+	c.FinishWriterSetup()
 	c.WriterRespHeader.Store(nil)
 	newHeaderChan := make(chan struct{})
 	c.respHeaderSet.Store(&newHeaderChan)
@@ -61,3 +62,4 @@ func (c *StreamCoordinator) StartMediaWriter(ctx context.Context, lbResult *load
 		}
 	}
 }
+

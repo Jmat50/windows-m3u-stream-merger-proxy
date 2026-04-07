@@ -10,8 +10,8 @@ import (
 	"strings"
 	"sync"
 
-	"m3u-stream-merger/logger"
-	"m3u-stream-merger/utils"
+	"windows-m3u-stream-merger-proxy/logger"
+	"windows-m3u-stream-merger-proxy/utils"
 )
 
 type SourceDownloaderResult struct {
@@ -163,3 +163,4 @@ func scanAndStream(r io.Reader, result *SourceDownloaderResult) {
 		result.Error <- fmt.Errorf("error reading content: %v", err)
 	}
 }
+

@@ -2,10 +2,10 @@ package updater
 
 import (
 	"context"
-	"m3u-stream-merger/config"
-	"m3u-stream-merger/handlers"
-	"m3u-stream-merger/logger"
-	"m3u-stream-merger/sourceproc"
+	"windows-m3u-stream-merger-proxy/config"
+	"windows-m3u-stream-merger-proxy/handlers"
+	"windows-m3u-stream-merger-proxy/logger"
+	"windows-m3u-stream-merger-proxy/sourceproc"
 	"os"
 	"strings"
 	"sync"
@@ -100,3 +100,4 @@ func (instance *Updater) UpdateSources(ctx context.Context) {
 		}
 	}
 }
+

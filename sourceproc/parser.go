@@ -4,9 +4,9 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
-	"m3u-stream-merger/config"
-	"m3u-stream-merger/logger"
-	"m3u-stream-merger/utils"
+	"windows-m3u-stream-merger-proxy/config"
+	"windows-m3u-stream-merger-proxy/logger"
+	"windows-m3u-stream-merger-proxy/utils"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -59,6 +59,8 @@ func parseLine(line string, nextLine *LineDetails, m3uIndex string) *StreamInfo 
 		stream.Title = utils.TvgNameParser(strings.TrimSpace(commaSplit[1]))
 	}
 
+	stream.Title = applyChannelMergeRule(stream.Title)
+
 	if stream.Title == "" {
 		return nil
 	}
@@ -72,14 +74,16 @@ func parseLine(line string, nextLine *LineDetails, m3uIndex string) *StreamInfo 
 		return nil
 	}
 
-	base64Title := base64.StdEncoding.EncodeToString([]byte(stream.Title))
+	// Use URL-safe base64 for filenames to avoid path separators and other invalid chars on Windows.
+	base64Title := base64.RawURLEncoding.EncodeToString([]byte(stream.Title))
 	h := sha3.Sum224([]byte(cleanUrl))
 	urlHash := hex.EncodeToString(h[:])
 
 	// Determine shard from the first 3 hex characters of the URL hash
 	shard := urlHash[:3]
 	shardDir := filepath.Join(config.GetStreamsDirPath(), shard)
-	fileName := fmt.Sprintf("%s_%s|%s", base64Title, m3uIndex, urlHash)
+	// "|" is invalid in Windows filenames, so use "__" as a cross-platform delimiter.
+	fileName := fmt.Sprintf("%s_%s__%s", base64Title, m3uIndex, urlHash)
 	filePath := filepath.Join(shardDir, fileName)
 
 	stream.SourceM3U = m3uIndex
@@ -142,3 +146,4 @@ func formatStreamEntry(baseURL string, stream *StreamInfo) string {
 
 	return entry.String()
 }
+

@@ -6,10 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"m3u-stream-merger/proxy"
-	"m3u-stream-merger/proxy/client"
-	"m3u-stream-merger/proxy/loadbalancer"
-	"m3u-stream-merger/utils"
+	"windows-m3u-stream-merger-proxy/proxy"
+	"windows-m3u-stream-merger-proxy/proxy/client"
+	"windows-m3u-stream-merger-proxy/proxy/loadbalancer"
+	"windows-m3u-stream-merger-proxy/utils"
 	"math"
 	"math/rand/v2"
 	"net/http"
@@ -29,6 +29,7 @@ type PlaylistMetadata struct {
 	Version        int
 	IsEndlist      bool
 	Segments       []string
+	Variants       []string
 	IsMaster       bool
 }
 
@@ -42,6 +43,7 @@ func (c *StreamCoordinator) StartHLSWriter(ctx context.Context, lbResult *loadba
 	}()
 
 	c.LBResultOnWrite.Store(lbResult)
+	c.FinishWriterSetup()
 	c.WriterRespHeader.Store(nil)
 
 	newHeaderChan := make(chan struct{})
@@ -60,6 +62,7 @@ func (c *StreamCoordinator) StartHLSWriter(ctx context.Context, lbResult *loadba
 	lbResult.Response.Body.Close()
 
 	var lastErr error
+	emptyPlaylistCount := 0
 	lastChangeTime := time.Now()
 	pollInterval := time.Second
 	ticker := time.NewTicker(pollInterval)
@@ -70,7 +73,8 @@ func (c *StreamCoordinator) StartHLSWriter(ctx context.Context, lbResult *loadba
 		c.writeError(err, status)
 	}
 
-	lastMediaSeq := c.lastProcessedSeq.Load()
+	lastMediaSeq := int64(-1)
+	c.lastProcessedSeq.Store(lastMediaSeq)
 
 	for atomic.LoadInt32(&c.state) == stateActive {
 		select {
@@ -136,9 +140,39 @@ func (c *StreamCoordinator) StartHLSWriter(ctx context.Context, lbResult *loadba
 			}
 
 			if metadata.IsMaster {
-				writeErrorAndReturn(fmt.Errorf("master playlist not supported"), proxy.StatusServerError)
-				return
+				if len(metadata.Variants) == 0 {
+					c.logger.Warn("Master playlist has no variants")
+					writeErrorAndReturn(fmt.Errorf("master playlist has no variants"), proxy.StatusServerError)
+					return
+				}
+
+				nextPlaylist := metadata.Variants[0]
+				if nextPlaylist == playlistURL {
+					c.logger.Warnf("Master playlist resolved to itself: %s", playlistURL)
+					writeErrorAndReturn(fmt.Errorf("master playlist resolved to itself"), proxy.StatusServerError)
+					return
+				}
+
+				c.logger.Logf("Master playlist detected. Following first variant: %s", nextPlaylist)
+				playlistURL = nextPlaylist
+				lastMediaSeq = -1
+				c.lastProcessedSeq.Store(lastMediaSeq)
+				lastChangeTime = time.Now()
+				emptyPlaylistCount = 0
+				continue
 			}
+
+			if len(metadata.Segments) == 0 {
+				emptyPlaylistCount++
+				lastErr = fmt.Errorf("playlist has no media segments")
+				c.logger.Warnf("Playlist has no media segments (%s), retry %d", playlistURL, emptyPlaylistCount)
+				if emptyPlaylistCount >= 3 {
+					writeErrorAndReturn(lastErr, proxy.StatusServerError)
+					return
+				}
+				continue
+			}
+			emptyPlaylistCount = 0
 
 			if metadata.IsEndlist {
 				err := c.processSegments(ctx, metadata.Segments, streamC)
@@ -249,6 +283,7 @@ func (c *StreamCoordinator) streamSegment(ctx context.Context, segmentURL string
 func (c *StreamCoordinator) parsePlaylist(mediaURL string, content string) (*PlaylistMetadata, error) {
 	metadata := &PlaylistMetadata{
 		Segments:       make([]string, 0, initialSegmentCap),
+		Variants:       make([]string, 0, 8),
 		TargetDuration: 2,
 	}
 
@@ -258,6 +293,8 @@ func (c *StreamCoordinator) parsePlaylist(mediaURL string, content string) (*Pla
 	}
 
 	scanner := bufio.NewScanner(strings.NewReader(content))
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	expectVariant := false
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 
@@ -266,7 +303,8 @@ func (c *StreamCoordinator) parsePlaylist(mediaURL string, content string) (*Pla
 			continue
 		case strings.HasPrefix(line, "#EXT-X-STREAM-INF"):
 			metadata.IsMaster = true
-			return metadata, nil
+			expectVariant = true
+			continue
 		case strings.HasPrefix(line, "#EXT-X-VERSION:"):
 			_, _ = fmt.Sscanf(line, "#EXT-X-VERSION:%d", &metadata.Version)
 		case strings.HasPrefix(line, "#EXT-X-TARGETDURATION:"):
@@ -285,9 +323,20 @@ func (c *StreamCoordinator) parsePlaylist(mediaURL string, content string) (*Pla
 			if !segURL.IsAbs() {
 				segURL = base.ResolveReference(segURL)
 			}
+
+			if metadata.IsMaster {
+				metadata.Variants = append(metadata.Variants, segURL.String())
+				expectVariant = false
+				continue
+			}
+
 			metadata.Segments = append(metadata.Segments, segURL.String())
+		case strings.HasPrefix(line, "#") && metadata.IsMaster && expectVariant:
+			// Ignore non-URI master playlist tags until the next variant URI appears.
+			continue
 		}
 	}
 
 	return metadata, scanner.Err()
 }
+

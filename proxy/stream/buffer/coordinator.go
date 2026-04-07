@@ -6,11 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"m3u-stream-merger/logger"
-	"m3u-stream-merger/proxy"
-	"m3u-stream-merger/proxy/loadbalancer"
-	"m3u-stream-merger/proxy/stream/config"
-	"m3u-stream-merger/store"
+	"windows-m3u-stream-merger-proxy/logger"
+	"windows-m3u-stream-merger-proxy/proxy"
+	"windows-m3u-stream-merger-proxy/proxy/loadbalancer"
+	"windows-m3u-stream-merger-proxy/proxy/stream/config"
+	"windows-m3u-stream-merger-proxy/store"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -86,6 +86,9 @@ type StreamCoordinator struct {
 	streamID  string
 
 	InitializationMu sync.Mutex
+	WriterSetupMu    sync.Mutex
+	WriterSetupWait  chan struct{}
+	WriterSetupBusy  bool
 
 	// state represents active, draining, or closed.
 	state int32
@@ -150,6 +153,59 @@ func (c *StreamCoordinator) WaitHeaders(ctx context.Context) {
 	select {
 	case <-*ch:
 	case <-ctx.Done():
+	}
+}
+
+// TryStartWriterSetup claims the one-time writer setup slot for a stream.
+// It returns true only for the caller that should run load-balancing and
+// start the upstream writer.
+func (c *StreamCoordinator) TryStartWriterSetup() bool {
+	c.WriterSetupMu.Lock()
+	defer c.WriterSetupMu.Unlock()
+
+	if c.WriterSetupBusy || c.WriterActive.Load() || c.GetWriterLBResult() != nil {
+		return false
+	}
+
+	c.WriterSetupBusy = true
+	c.WriterSetupWait = make(chan struct{})
+	return true
+}
+
+// WaitForWriterSetup blocks until the in-flight writer setup completes or the
+// request context is cancelled.
+func (c *StreamCoordinator) WaitForWriterSetup(ctx context.Context) error {
+	c.WriterSetupMu.Lock()
+	ch := c.WriterSetupWait
+	busy := c.WriterSetupBusy
+	c.WriterSetupMu.Unlock()
+
+	if !busy || ch == nil {
+		return nil
+	}
+
+	select {
+	case <-ch:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// FinishWriterSetup releases any waiters blocked on an in-flight writer setup.
+// It is safe to call multiple times.
+func (c *StreamCoordinator) FinishWriterSetup() {
+	c.WriterSetupMu.Lock()
+	defer c.WriterSetupMu.Unlock()
+
+	if !c.WriterSetupBusy {
+		return
+	}
+
+	c.WriterSetupBusy = false
+	if c.WriterSetupWait != nil {
+		close(c.WriterSetupWait)
+		c.WriterSetupWait = nil
 	}
 }
 
@@ -406,16 +462,21 @@ func (c *StreamCoordinator) readAndWriteStream(
 ) error {
 	buffer := make([]byte, c.config.ChunkSize)
 	timeout := c.getTimeoutDuration()
-	backoff := proxy.NewBackoffStrategy(c.config.InitialBackoff,
-		time.Duration(c.config.TimeoutSeconds-1)*time.Second)
+	maxBackoffSeconds := c.config.TimeoutSeconds - 1
+	if maxBackoffSeconds < 0 {
+		maxBackoffSeconds = 0
+	}
+	backoff := proxy.NewBackoffStrategy(
+		c.config.InitialBackoff,
+		time.Duration(maxBackoffSeconds)*time.Second,
+	)
 
 	lastSuccess := time.Now()
 	lastErr := time.Now()
 	zeroReads := 0
 
-	var totalBytesRead int64
-	readingStartTime := time.Now()
-	lastHealthLog := time.Now()
+	windowBytesRead := int64(0)
+	windowStart := time.Now()
 
 	for atomic.LoadInt32(&c.state) == stateActive {
 		select {
@@ -426,11 +487,56 @@ func (c *StreamCoordinator) readAndWriteStream(
 				return ErrStreamTimeout
 			}
 
-			n, err := body.Read(buffer)
+			readCh := make(chan struct {
+				n   int
+				err error
+			}, 1)
+			go func() {
+				n, err := body.Read(buffer)
+				readCh <- struct {
+					n   int
+					err error
+				}{n: n, err: err}
+			}()
+
+			var n int
+			var err error
+			if c.config.TimeoutSeconds > 0 {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case readRes := <-readCh:
+					n = readRes.n
+					err = readRes.err
+				case <-time.After(timeout):
+					c.logger.Warnf("Stream read stalled for %v", timeout)
+					return ErrStreamTimeout
+				}
+			} else {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case readRes := <-readCh:
+					n = readRes.n
+					err = readRes.err
+				}
+			}
+
 			if n == 0 {
 				zeroReads++
 				if zeroReads > 10 {
 					return io.EOF
+				}
+				if err != nil {
+					if err == io.EOF {
+						return io.EOF
+					}
+					if c.shouldRetry(timeout) {
+						backoff.Sleep(ctx)
+						lastErr = time.Now()
+						continue
+					}
+					return err
 				}
 				time.Sleep(10 * time.Millisecond)
 				continue
@@ -438,20 +544,24 @@ func (c *StreamCoordinator) readAndWriteStream(
 
 			lastSuccess = time.Now()
 			zeroReads = 0
-			totalBytesRead += int64(n)
+			windowBytesRead += int64(n)
 
-			if time.Since(lastHealthLog) >= 2*time.Second {
-				elapsed := time.Since(readingStartTime).Seconds()
-				avgThroughput := float64(totalBytesRead) / elapsed
-				c.logger.Debugf("Buffer health: average throughput = %.2f Bps", avgThroughput)
-				lastHealthLog = time.Now()
+			if time.Since(windowStart) >= 2*time.Second {
+				windowSeconds := time.Since(windowStart).Seconds()
+				if windowSeconds <= 0 {
+					windowSeconds = 0.001
+				}
+				windowThroughput := float64(windowBytesRead) / windowSeconds
+				c.logger.Debugf("Buffer health: current throughput = %.2f Bps", windowThroughput)
+				windowStart = time.Now()
+				windowBytesRead = 0
 
 				if c.config.ExpectedThroughput > 0 &&
-					avgThroughput < float64(c.config.ExpectedThroughput) {
-					c.logger.Warnf("Low buffer health: average throughput %.2f Bps below expected %d Bps",
-						avgThroughput, c.config.ExpectedThroughput,
+					windowThroughput < float64(c.config.ExpectedThroughput) {
+					c.logger.Warnf("Low buffer health: throughput %.2f Bps below expected %d Bps",
+						windowThroughput, c.config.ExpectedThroughput,
 					)
-					return fmt.Errorf("low buffer health: %.2f Bps", avgThroughput)
+					return fmt.Errorf("low buffer health: %.2f Bps", windowThroughput)
 				}
 			}
 
@@ -484,3 +594,4 @@ func (c *StreamCoordinator) readAndWriteStream(
 	}
 	return nil
 }
+

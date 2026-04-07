@@ -3,15 +3,26 @@ package main
 import (
 	"context"
 	"fmt"
-	"m3u-stream-merger/handlers"
-	"m3u-stream-merger/logger"
-	"m3u-stream-merger/updater"
+	"windows-m3u-stream-merger-proxy/config"
+	"windows-m3u-stream-merger-proxy/handlers"
+	"windows-m3u-stream-merger-proxy/logger"
+	"windows-m3u-stream-merger-proxy/updater"
 	"net/http"
 	"os"
 	"time"
+	_ "time/tzdata"
 )
 
+func failStartup(format string, v ...any) {
+	msg := fmt.Sprintf(format, v...)
+	logger.Default.Errorf("STARTUP ERROR: %s", msg)
+	_, _ = fmt.Fprintf(os.Stderr, "STARTUP ERROR: %s\n", msg)
+	os.Exit(1)
+}
+
 func main() {
+	config.InitFromEnv()
+
 	// Context for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -23,15 +34,16 @@ func main() {
 	logger.Default.Log("Starting updater...")
 	_, err := updater.Initialize(ctx, logger.Default, m3uHandler)
 	if err != nil {
-		logger.Default.Fatalf("Error initializing updater: %v", err)
+		failStartup("Error initializing updater: %v", err)
 	}
 
 	// manually set time zone
 	if tz := os.Getenv("TZ"); tz != "" {
-		var err error
-		time.Local, err = time.LoadLocation(tz)
+		loc, err := time.LoadLocation(tz)
 		if err != nil {
-			logger.Default.Fatalf("error loading location '%s': %v\n", tz, err)
+			logger.Default.Warnf("error loading location '%s': %v; continuing with system local timezone", tz, err)
+		} else {
+			time.Local = loc
 		}
 	}
 
@@ -56,6 +68,7 @@ func main() {
 	logger.Default.Log("Stream Endpoint is running (`/p/{originalBasePath}/{streamID}.{fileExt}`)")
 	err = http.ListenAndServe(fmt.Sprintf(":%s", os.Getenv("PORT")), nil)
 	if err != nil {
-		logger.Default.Fatalf("HTTP server error: %v", err)
+		failStartup("HTTP server error: %v", err)
 	}
 }
+

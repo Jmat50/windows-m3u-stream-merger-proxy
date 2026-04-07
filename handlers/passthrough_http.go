@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"strings"
 
-	"m3u-stream-merger/logger"
-	"m3u-stream-merger/utils"
+	"windows-m3u-stream-merger-proxy/logger"
+	"windows-m3u-stream-merger-proxy/utils"
 )
 
 type PassthroughHTTPHandler struct {
@@ -74,3 +74,4 @@ func (h *PassthroughHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		h.logger.Error("Failed to write response body: " + err.Error())
 	}
 }
+

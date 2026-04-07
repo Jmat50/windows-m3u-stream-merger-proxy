@@ -3,8 +3,8 @@ package sourceproc
 import (
 	"encoding/json"
 	"fmt"
-	"m3u-stream-merger/config"
-	"m3u-stream-merger/logger"
+	"windows-m3u-stream-merger-proxy/config"
+	"windows-m3u-stream-merger-proxy/logger"
 	"os"
 	"path/filepath"
 	"sort"
@@ -29,7 +29,7 @@ type SortingManager struct {
 
 type shardData struct {
 	index  map[string]bool
-	buffer map[string][]byte
+	buffer map[string]*StreamInfo
 }
 
 func newSortingManager() *SortingManager {
@@ -50,21 +50,21 @@ func newSortingManager() *SortingManager {
 }
 
 func (m *SortingManager) AddToSorter(s *StreamInfo) error {
-	titleHash := xxhash.Sum64String(s.Title)
-	shardIndex := titleHash % mutexShards
 	sanitizedTitle := sanitizeField(s.Title)
+	titleHash := xxhash.Sum64String(sanitizedTitle)
+	shardIndex := titleHash % mutexShards
 
 	var addErr error
 	m.shardMap.Compute(shardIndex, func(oldVal *shardData, loaded bool) (*shardData, bool) {
 		if oldVal == nil {
 			oldVal = &shardData{
 				index:  make(map[string]bool),
-				buffer: make(map[string][]byte),
+				buffer: make(map[string]*StreamInfo),
 			}
 		}
 
 		if oldVal.index[sanitizedTitle] {
-			addErr = m.handleExisting(shardIndex, sanitizedTitle, s)
+			addErr = m.handleExisting(shardIndex, sanitizedTitle, s, oldVal)
 			return oldVal, false
 		}
 
@@ -79,18 +79,12 @@ func (m *SortingManager) AddToSorter(s *StreamInfo) error {
 				oldVal.index[title] = true
 			}
 			if oldVal.index[sanitizedTitle] {
-				addErr = m.handleExisting(shardIndex, sanitizedTitle, s)
+				addErr = m.handleExisting(shardIndex, sanitizedTitle, s, oldVal)
 				return oldVal, false
 			}
 		}
 
-		encoded, err := json.Marshal(s)
-		if err != nil {
-			addErr = fmt.Errorf("failed to marshal StreamInfo: %w", err)
-			return oldVal, false
-		}
-
-		oldVal.buffer[sanitizedTitle] = encoded
+		oldVal.buffer[sanitizedTitle] = s
 		oldVal.index[sanitizedTitle] = true
 
 		if len(oldVal.buffer) >= 250 {
@@ -110,7 +104,14 @@ func (m *SortingManager) Close() {
 	os.RemoveAll(basePath)
 }
 
-func (m *SortingManager) handleExisting(shardIndex uint64, title string, s *StreamInfo) error {
+func (m *SortingManager) handleExisting(shardIndex uint64, title string, s *StreamInfo, data *shardData) error {
+	if data != nil {
+		if existing, exists := data.buffer[title]; exists {
+			data.buffer[title] = mergeStreamInfoAttributes(existing, s)
+			return nil
+		}
+	}
+
 	entries, err := m.readShard(shardIndex)
 	if err != nil {
 		return err
@@ -136,19 +137,22 @@ func (m *SortingManager) flushShard(shardIndex uint64, data *shardData) error {
 		return err
 	}
 
-	for title, buf := range data.buffer {
-		var s StreamInfo
-		if err := json.Unmarshal(buf, &s); err != nil {
+	for title, stream := range data.buffer {
+		if stream == nil {
 			continue
 		}
-		entries[title] = &s
+		if existing, exists := entries[title]; exists {
+			entries[title] = mergeStreamInfoAttributes(existing, stream)
+			continue
+		}
+		entries[title] = stream
 	}
 
 	if err := m.writeShard(shardIndex, entries); err != nil {
 		return err
 	}
 
-	data.buffer = make(map[string][]byte)
+	data.buffer = make(map[string]*StreamInfo)
 	return nil
 }
 
@@ -329,7 +333,8 @@ func sanitizeField(value string) string {
 		">", "_",
 		"|", "_",
 		" ", "",
-	).Replace(value)
+	).Replace(strings.TrimSpace(value))
+	sanitized = strings.ToLower(sanitized)
 
 	runes := []rune(sanitized)
 	if len(runes) > 100 {
@@ -354,3 +359,4 @@ func compareNumeric(a, b string) int {
 
 	return strings.Compare(a, b)
 }
+

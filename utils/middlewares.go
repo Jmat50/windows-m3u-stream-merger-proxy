@@ -2,7 +2,7 @@ package utils
 
 import (
 	"encoding/base64"
-	"m3u-stream-merger/logger"
+	"windows-m3u-stream-merger-proxy/logger"
 	"net/url"
 	"os"
 	"regexp"
@@ -64,3 +64,4 @@ func TvgLogoParser(value string) string {
 
 	return value
 }
+

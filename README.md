@@ -1,5 +1,5 @@
-# 📡 M3U Stream Merger Proxy
-[![Codacy Badge](https://app.codacy.com/project/badge/Grade/15a1064c638d4402931fe633b2baa51d)](https://app.codacy.com/gh/sonroyaalmerol/m3u-stream-merger-proxy/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade) [![Docker Pulls](https://img.shields.io/docker/pulls/sonroyaalmerol/m3u-stream-merger-proxy.svg)](https://hub.docker.com/r/sonroyaalmerol/m3u-stream-merger-proxy/) [![](https://img.shields.io/docker/image-size/sonroyaalmerol/m3u-stream-merger-proxy)](https://img.shields.io/docker/image-size/sonroyaalmerol/m3u-stream-merger-proxy) [![Release Images](https://github.com/sonroyaalmerol/m3u-stream-merger-proxy/actions/workflows/release.yml/badge.svg)](https://github.com/sonroyaalmerol/m3u-stream-merger-proxy/actions/workflows/release.yml) [![Developer Images](https://github.com/sonroyaalmerol/m3u-stream-merger-proxy/actions/workflows/developer.yml/badge.svg)](https://github.com/sonroyaalmerol/m3u-stream-merger-proxy/actions/workflows/developer.yml) [![Discord](https://img.shields.io/discord/1274826220596625603?logo=discord&label=Discord&link=https%3A%2F%2Fdiscord.gg%2Fb2hVjRvkcj)](https://discord.com/invite/b2hVjRvkcj)
+# Windows M3U Stream Merger Proxy
+Forked from the upstream project by Son Roy Almerol and repackaged here as windows-m3u-stream-merger-proxy.
 <!-- ALL-CONTRIBUTORS-BADGE:START - Do not remove or modify this section -->
 [![All Contributors](https://img.shields.io/badge/all_contributors-5-orange.svg?style=flat-square)](#contributors-)
 <!-- ALL-CONTRIBUTORS-BADGE:END -->
@@ -8,7 +8,7 @@
 > This repo is currently in heavy development. Expect major changes on every release until the first stable release, `1.0.0`.
 > Using the `:dev` tag will allow you to be up-to-date with the main branch.
 
-Streamline your IPTV experience by consolidating multiple M3U playlists into a single source with the blazingly fast 🔥 and lightweight M3U Stream Merger Proxy. This service acts as a modern HTTP proxy server, effortlessly merging and streaming content from various M3U sources.
+Streamline your IPTV experience by consolidating multiple M3U playlists into a single source with the blazingly fast 🔥 and lightweight Windows M3U Stream Merger Proxy. This service acts as a modern HTTP proxy server, effortlessly merging and streaming content from various M3U sources.
 
 Uses the channel title or `tvg-name` (as fallback) to merge multiple identical channels into one. This is not an xTeVe/Threadfin replacement but is often used with it.
 
@@ -57,6 +57,19 @@ Uses the channel title or `tvg-name` (as fallback) to merge multiple identical c
 - [Docker](https://www.docker.com/) installed on your system.
 - M3U URLs containing a playlist of video streams.
 
+## Windows Desktop App
+
+A bundled Windows GUI wrapper is available in [`windows-app/`](windows-app/README.md).
+
+It includes:
+
+- Start/stop controls for the proxy server
+- Editable server settings (including M3U URLs/concurrency)
+- Live server logs
+- Self-contained app data under `%LOCALAPPDATA%\WindowsM3UStreamMergerProxyDesktop`
+
+Build instructions are in [`windows-app/README.md`](windows-app/README.md).
+
 ## Docker Compose
 
 Deploy with ease using the provided `docker-compose.yml`:
@@ -64,8 +77,8 @@ Deploy with ease using the provided `docker-compose.yml`:
 ```yaml
 
 services:
-  m3u-stream-merger-proxy:
-    image: sonroyaalmerol/m3u-stream-merger-proxy:latest
+  windows-m3u-stream-merger-proxy:
+    image: ghcr.io/<your-github-username>/windows-m3u-stream-merger-proxy:latest
     ports:
       - "8080:8080"
     environment:
@@ -83,7 +96,7 @@ services:
     restart: always
     # [OPTIONAL] Cache persistence: This will allow you to reuse the M3U cache across container recreates.
     # volumes:
-    #   - ./data:/m3u-proxy/data
+    #   - ./data:/windows-m3u-stream-merger-proxy/data
 ```
 
 Access the generated M3U playlist at `http://<server ip>:8080/playlist.m3u`.
@@ -92,7 +105,7 @@ Access the generated M3U playlist at `http://<server ip>:8080/playlist.m3u`.
 
 > [!NOTE]
 > This configuration list only applies to the latest release version.
-> To see the README of a specific version, navigate to the specific tag of the desired version (e.g. [`0.10.0`](https://github.com/sonroyaalmerol/m3u-stream-merger-proxy/tree/0.10.0)).
+> To see the README of a specific version, navigate to the desired tag in your fork.
 
 > [!TIP]
 > For variables needing Go regexp (regular expression) values, make sure to [build the regexp](https://regex101.com/) with the Golang flavor.
@@ -105,6 +118,8 @@ Access the generated M3U playlist at `http://<server ip>:8080/playlist.m3u`.
 | PUID | Set UID of user running the container.                  |   1000 |   Any valid UID |
 | PGID | Set GID of user running the container.                  |   1000 |   Any valid GID |
 | TZ                          | Set timezone                                           | Etc/UTC     | [TZ Identifiers](https://nodatime.org/TimeZones) |
+| DATA_PATH | Set data directory used by the service. | /windows-m3u-stream-merger-proxy/data/ | Any valid writable directory |
+| TEMP_PATH | Set temp/cache directory used by the service. | /tmp/windows-m3u-stream-merger-proxy/ | Any valid writable directory |
 
 ### Playlist Source Configs
 | ENV VAR                     | Description                                              | Default Value | Possible Values                                |
@@ -192,27 +207,13 @@ Huge thanks to those who donated for the development of this project!
 <a href="https://github.com/kpirnie"><img src="https://github.com/kpirnie.png" width="50px" alt="kpirnie" /></a>&nbsp;&nbsp;<a href="https://github.com/jbumgard"><img src="https://github.com/jbumgard.png" width="50px" alt="jbumgard" /></a>&nbsp;&nbsp;<a href="https://github.com/aniel300"><img src="https://github.com/aniel300.png" width="50px" alt="aniel300" /></a>&nbsp;&nbsp;<a href="https://github.com/raf02"><img src="https://github.com/raf02.png" width="50px" alt="raf02" /></a>&nbsp;&nbsp;
 </p>
 
-## Contributors ✨
+## Contributors
 
-<!-- ALL-CONTRIBUTORS-LIST:START - Do not remove or modify this section -->
-<!-- prettier-ignore-start -->
-<!-- markdownlint-disable -->
-<table>
-  <tbody>
-    <tr>
-      <td align="center" valign="top" width="14.28%"><a href="https://paypal.me/saalmerol"><img src="https://avatars.githubusercontent.com/u/17176864?v=4?s=100" width="100px;" alt="Son Roy Almerol"/><br /><sub><b>Son Roy Almerol</b></sub></a><br /><a href="#infra-sonroyaalmerol" title="Infrastructure (Hosting, Build-Tools, etc)">🚇</a> <a href="https://github.com/sonroyaalmerol/m3u-stream-merger-proxy/commits?author=sonroyaalmerol" title="Tests">⚠️</a> <a href="https://github.com/sonroyaalmerol/m3u-stream-merger-proxy/commits?author=sonroyaalmerol" title="Documentation">📖</a> <a href="https://github.com/sonroyaalmerol/m3u-stream-merger-proxy/commits?author=sonroyaalmerol" title="Code">💻</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://github.com/andjos"><img src="https://avatars.githubusercontent.com/u/15799439?v=4?s=100" width="100px;" alt="Anders Josefsson"/><br /><sub><b>Anders Josefsson</b></sub></a><br /><a href="https://github.com/sonroyaalmerol/m3u-stream-merger-proxy/commits?author=andjos" title="Documentation">📖</a> <a href="https://github.com/sonroyaalmerol/m3u-stream-merger-proxy/commits?author=andjos" title="Code">💻</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://pixelhosting.nl"><img src="https://avatars.githubusercontent.com/u/45701225?v=4?s=100" width="100px;" alt="blackwhitebear8"/><br /><sub><b>blackwhitebear8</b></sub></a><br /><a href="https://github.com/sonroyaalmerol/m3u-stream-merger-proxy/commits?author=blackwhitebear8" title="Code">💻</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://kevinpirnie.com"><img src="https://avatars.githubusercontent.com/u/48323656?v=4?s=100" width="100px;" alt="Kevin Pirnie"/><br /><sub><b>Kevin Pirnie</b></sub></a><br /><a href="https://github.com/sonroyaalmerol/m3u-stream-merger-proxy/commits?author=kpirnie" title="Code">💻</a> <a href="https://github.com/sonroyaalmerol/m3u-stream-merger-proxy/commits?author=kpirnie" title="Documentation">📖</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://github.com/TgSeed"><img src="https://avatars.githubusercontent.com/u/92082995?v=4?s=100" width="100px;" alt="TgSeed"/><br /><sub><b>TgSeed</b></sub></a><br /><a href="https://github.com/sonroyaalmerol/m3u-stream-merger-proxy/commits?author=TgSeed" title="Code">💻</a></td>
-    </tr>
-  </tbody>
-</table>
-
-<!-- markdownlint-restore -->
-<!-- prettier-ignore-end -->
-
-<!-- ALL-CONTRIBUTORS-LIST:END -->
+- Son Roy Almerol
+- Anders Josefsson
+- blackwhitebear8
+- Kevin Pirnie
+- TgSeed
 
 ## Contributing
 
@@ -226,3 +227,5 @@ And if you like the project, but just don't have time to contribute, that's fine
 - Star the project
 - Tweet about it
 - Mention the project and tell your friends/colleagues
+
+

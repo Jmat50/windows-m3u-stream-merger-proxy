@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"m3u-stream-merger/logger"
+	"windows-m3u-stream-merger-proxy/logger"
 )
 
 type M3UHTTPHandler struct {
@@ -81,3 +81,4 @@ func (h *M3UHTTPHandler) parseCredentials(raw string) [][]string {
 	}
 	return result
 }
+

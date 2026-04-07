@@ -5,13 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"m3u-stream-merger/logger"
-	"m3u-stream-merger/proxy"
-	"m3u-stream-merger/proxy/client"
-	"m3u-stream-merger/proxy/loadbalancer"
-	"m3u-stream-merger/proxy/stream/buffer"
-	"m3u-stream-merger/proxy/stream/config"
-	"m3u-stream-merger/store"
+	"windows-m3u-stream-merger-proxy/logger"
+	"windows-m3u-stream-merger-proxy/proxy"
+	"windows-m3u-stream-merger-proxy/proxy/client"
+	"windows-m3u-stream-merger-proxy/proxy/loadbalancer"
+	"windows-m3u-stream-merger-proxy/proxy/stream/buffer"
+	"windows-m3u-stream-merger-proxy/proxy/stream/config"
+	"windows-m3u-stream-merger-proxy/store"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -38,6 +38,9 @@ func (m *mockStreamManager) LoadBalancer(ctx context.Context, req *http.Request)
 }
 
 func (m *mockStreamManager) ProxyStream(ctx context.Context, coordinator *buffer.StreamCoordinator, lbRes *loadbalancer.LoadBalancerResult, sClient *client.StreamClient, exitStatus chan<- int) {
+	if coordinator != nil {
+		coordinator.FinishWriterSetup()
+	}
 	if m.proxyStreamFunc != nil {
 		m.proxyStreamFunc(ctx, coordinator, lbRes, sClient, exitStatus)
 	}
@@ -199,8 +202,8 @@ func TestStreamHTTPHandler_ServeHTTP(t *testing.T) {
 
 				return manager
 			},
-			expectedStatus: http.StatusOK,
-			expectedError:  false,
+			expectedStatus: http.StatusBadGateway,
+			expectedError:  true,
 		},
 		{
 			name: "load balancer network error",
@@ -226,7 +229,7 @@ func TestStreamHTTPHandler_ServeHTTP(t *testing.T) {
 
 				return manager
 			},
-			expectedStatus: http.StatusOK,
+			expectedStatus: http.StatusBadGateway,
 			expectedError:  true,
 		},
 		{
@@ -518,3 +521,91 @@ func TestStreamHTTPHandler_DisconnectionConcurrency(t *testing.T) {
 		})
 	}
 }
+
+func TestStreamHTTPHandler_ReusesSharedBufferDuringConcurrentStartup(t *testing.T) {
+	cm := store.NewConcurrencyManager()
+	streamConfig := config.NewDefaultStreamConfig()
+	streamConfig.ChunkSize = 1024 * 1024
+	registry := buffer.NewStreamRegistry(streamConfig, cm, logger.Default, time.Second)
+	registry.Unrestrict = true
+
+	var loadBalancerCalls atomic.Int32
+	firstLoadBalancerStarted := make(chan struct{})
+	releaseFirstLoadBalancer := make(chan struct{})
+
+	manager := &mockStreamManager{}
+	manager.loadBalancerFunc = func(ctx context.Context, req *http.Request) (*loadbalancer.LoadBalancerResult, error) {
+		call := loadBalancerCalls.Add(1)
+		if call == 1 {
+			close(firstLoadBalancerStarted)
+			select {
+			case <-releaseFirstLoadBalancer:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+
+		return &loadbalancer.LoadBalancerResult{
+			Response: mockResponse(http.StatusOK, "shared startup"),
+			URL:      "http://example.com/live.ts",
+			Index:    "1",
+			SubIndex: "1",
+		}, nil
+	}
+
+	manager.proxyStreamFunc = func(ctx context.Context, coordinator *buffer.StreamCoordinator, lbRes *loadbalancer.LoadBalancerResult, sClient *client.StreamClient, exitStatus chan<- int) {
+		coordinator.LBResultOnWrite.Store(lbRes)
+		coordinator.FinishWriterSetup()
+		_ = sClient.WriteHeader(lbRes.Response.StatusCode)
+		exitStatus <- proxy.StatusM3U8Parsed
+	}
+
+	manager.getCmFunc = func() *store.ConcurrencyManager {
+		return cm
+	}
+
+	manager.getRegistryFunc = func() *buffer.StreamRegistry {
+		return registry
+	}
+
+	handler := NewStreamHTTPHandler(manager, logger.Default)
+
+	runRequest := func(done chan<- int) {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		req := httptest.NewRequest(http.MethodGet, "/shared.ts", nil).WithContext(ctx)
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, req)
+		done <- recorder.Code
+	}
+
+	done := make(chan int, 2)
+	go runRequest(done)
+
+	select {
+	case <-firstLoadBalancerStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for first load balancer call")
+	}
+
+	go runRequest(done)
+	time.Sleep(100 * time.Millisecond)
+	close(releaseFirstLoadBalancer)
+
+	for i := 0; i < 2; i++ {
+		select {
+		case code := <-done:
+			if code != http.StatusOK {
+				t.Fatalf("expected HTTP 200 for request %d, got %d", i+1, code)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for request %d to finish", i+1)
+		}
+	}
+
+	if got := loadBalancerCalls.Load(); got != 1 {
+		t.Fatalf("expected one load balancer call while shared buffer initializes, got %d", got)
+	}
+}
+

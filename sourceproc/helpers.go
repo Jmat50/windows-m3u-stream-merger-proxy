@@ -8,9 +8,9 @@ import (
 	"strings"
 	"sync"
 
-	"m3u-stream-merger/config"
-	"m3u-stream-merger/logger"
-	"m3u-stream-merger/utils"
+	"windows-m3u-stream-merger-proxy/config"
+	"windows-m3u-stream-merger-proxy/logger"
+	"windows-m3u-stream-merger-proxy/utils"
 
 	"github.com/puzpuzpuz/xsync/v3"
 )
@@ -114,3 +114,4 @@ func ClearProcessedM3Us() {
 		logger.Default.Error(err.Error())
 	}
 }
+

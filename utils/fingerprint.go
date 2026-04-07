@@ -4,7 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"m3u-stream-merger/logger"
+	"windows-m3u-stream-merger-proxy/logger"
 	"net/http"
 	"strings"
 )
@@ -28,3 +28,4 @@ func GenerateFingerprint(r *http.Request) string {
 	hash := sha256.Sum256([]byte(data))
 	return hex.EncodeToString(hash[:])
 }
+

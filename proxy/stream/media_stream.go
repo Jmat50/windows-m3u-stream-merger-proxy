@@ -4,13 +4,13 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"m3u-stream-merger/logger"
-	"m3u-stream-merger/proxy"
-	"m3u-stream-merger/proxy/client"
-	"m3u-stream-merger/proxy/loadbalancer"
-	"m3u-stream-merger/proxy/stream/buffer"
-	"m3u-stream-merger/proxy/stream/config"
-	"m3u-stream-merger/utils"
+	"windows-m3u-stream-merger-proxy/logger"
+	"windows-m3u-stream-merger-proxy/proxy"
+	"windows-m3u-stream-merger-proxy/proxy/client"
+	"windows-m3u-stream-merger-proxy/proxy/loadbalancer"
+	"windows-m3u-stream-merger-proxy/proxy/stream/buffer"
+	"windows-m3u-stream-merger-proxy/proxy/stream/config"
+	"windows-m3u-stream-merger-proxy/utils"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -132,6 +132,7 @@ func (h *StreamHandler) HandleStream(
 			defer func() {
 				h.coordinator.InitializationMu.Lock()
 				h.coordinator.WriterActive.Store(false)
+				h.coordinator.FinishWriterSetup()
 				h.coordinator.InitializationMu.Unlock()
 			}()
 			if utils.IsAnM3U8Media(lbResult.Response) {
@@ -143,6 +144,7 @@ func (h *StreamHandler) HandleStream(
 	}
 
 	if err := h.coordinator.RegisterClient(); err != nil {
+		h.coordinator.FinishWriterSetup()
 		h.coordinator.InitializationMu.Unlock()
 		return StreamResult{0, err, proxy.StatusServerError}
 	}
@@ -307,3 +309,4 @@ func (h *StreamHandler) safeFlush(streamClient *client.StreamClient) error {
 	streamClient.Flush()
 	return nil
 }
+

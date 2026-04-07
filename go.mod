@@ -1,4 +1,4 @@
-module m3u-stream-merger
+module windows-m3u-stream-merger-proxy
 
 go 1.25.6
 
@@ -27,3 +27,4 @@ require (
 	github.com/rogpeppe/go-internal v1.14.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
