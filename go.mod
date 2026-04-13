@@ -13,10 +13,10 @@ require (
 	github.com/rs/zerolog v1.34.0
 	github.com/stretchr/testify v1.11.1
 	github.com/valyala/bytebufferpool v1.0.0
-	golang.org/x/crypto v0.47.0
+	golang.org/x/crypto v0.50.0
 )
 
-require golang.org/x/sys v0.40.0 // indirect
+require golang.org/x/sys v0.43.0 // indirect
 
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
@@ -27,4 +27,3 @@ require (
 	github.com/rogpeppe/go-internal v1.14.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
