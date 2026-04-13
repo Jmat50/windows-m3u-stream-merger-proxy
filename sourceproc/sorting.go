@@ -1,0 +1,362 @@
+package sourceproc
+
+import (
+	"encoding/json"
+	"fmt"
+	"windows-m3u-stream-merger-proxy/config"
+	"windows-m3u-stream-merger-proxy/logger"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+
+	"github.com/cespare/xxhash"
+	"github.com/puzpuzpuz/xsync/v3"
+)
+
+const (
+	mutexShards       = 4096
+	shardFileTemplate = "shard-%04d.json"
+)
+
+type SortingManager struct {
+	shardMap   *xsync.MapOf[uint64, *shardData]
+	sortingKey string
+	sortingDir string
+	basePath   string
+}
+
+type shardData struct {
+	index  map[string]bool
+	buffer map[string]*StreamInfo
+}
+
+func newSortingManager() *SortingManager {
+	sortingKey := os.Getenv("SORTING_KEY")
+	sortingDir := strings.ToLower(os.Getenv("SORTING_DIRECTION"))
+	basePath := config.GetSortDirPath()
+
+	if err := os.MkdirAll(basePath, 0755); err != nil {
+		logger.Default.Error(err.Error())
+	}
+
+	return &SortingManager{
+		shardMap:   xsync.NewMapOf[uint64, *shardData](),
+		sortingKey: sortingKey,
+		sortingDir: sortingDir,
+		basePath:   basePath,
+	}
+}
+
+func (m *SortingManager) AddToSorter(s *StreamInfo) error {
+	sanitizedTitle := sanitizeField(s.Title)
+	titleHash := xxhash.Sum64String(sanitizedTitle)
+	shardIndex := titleHash % mutexShards
+
+	var addErr error
+	m.shardMap.Compute(shardIndex, func(oldVal *shardData, loaded bool) (*shardData, bool) {
+		if oldVal == nil {
+			oldVal = &shardData{
+				index:  make(map[string]bool),
+				buffer: make(map[string]*StreamInfo),
+			}
+		}
+
+		if oldVal.index[sanitizedTitle] {
+			addErr = m.handleExisting(shardIndex, sanitizedTitle, s, oldVal)
+			return oldVal, false
+		}
+
+		shardFile := filepath.Join(m.basePath, fmt.Sprintf(shardFileTemplate, shardIndex))
+		if _, err := os.Stat(shardFile); err == nil {
+			entries, err := m.readShard(shardIndex)
+			if err != nil {
+				addErr = err
+				return oldVal, false
+			}
+			for title := range entries {
+				oldVal.index[title] = true
+			}
+			if oldVal.index[sanitizedTitle] {
+				addErr = m.handleExisting(shardIndex, sanitizedTitle, s, oldVal)
+				return oldVal, false
+			}
+		}
+
+		oldVal.buffer[sanitizedTitle] = s
+		oldVal.index[sanitizedTitle] = true
+
+		if len(oldVal.buffer) >= 250 {
+			if err := m.flushShard(shardIndex, oldVal); err != nil {
+				addErr = err
+			}
+		}
+
+		return oldVal, false
+	})
+
+	return addErr
+}
+
+func (m *SortingManager) Close() {
+	basePath := config.GetSortDirPath()
+	os.RemoveAll(basePath)
+}
+
+func (m *SortingManager) handleExisting(shardIndex uint64, title string, s *StreamInfo, data *shardData) error {
+	if data != nil {
+		if existing, exists := data.buffer[title]; exists {
+			data.buffer[title] = mergeStreamInfoAttributes(existing, s)
+			return nil
+		}
+	}
+
+	entries, err := m.readShard(shardIndex)
+	if err != nil {
+		return err
+	}
+
+	if existing, exists := entries[title]; exists {
+		merged := mergeStreamInfoAttributes(existing, s)
+		entries[title] = merged
+	} else {
+		entries[title] = s
+	}
+
+	return m.writeShard(shardIndex, entries)
+}
+
+func (m *SortingManager) flushShard(shardIndex uint64, data *shardData) error {
+	if len(data.buffer) == 0 {
+		return nil
+	}
+
+	entries, err := m.readShard(shardIndex)
+	if err != nil {
+		return err
+	}
+
+	for title, stream := range data.buffer {
+		if stream == nil {
+			continue
+		}
+		if existing, exists := entries[title]; exists {
+			entries[title] = mergeStreamInfoAttributes(existing, stream)
+			continue
+		}
+		entries[title] = stream
+	}
+
+	if err := m.writeShard(shardIndex, entries); err != nil {
+		return err
+	}
+
+	data.buffer = make(map[string]*StreamInfo)
+	return nil
+}
+
+func (m *SortingManager) readShard(shardIndex uint64) (map[string]*StreamInfo, error) {
+	shardFile := filepath.Join(m.basePath, fmt.Sprintf(shardFileTemplate, shardIndex))
+	entries := make(map[string]*StreamInfo)
+
+	file, err := os.Open(shardFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return entries, nil
+		}
+		return nil, err
+	}
+	defer file.Close()
+
+	decoder := json.NewDecoder(file)
+	if err := decoder.Decode(&entries); err != nil {
+		return nil, fmt.Errorf("failed to decode shard: %w", err)
+	}
+
+	return entries, nil
+}
+
+func (m *SortingManager) writeShard(shardIndex uint64, entries map[string]*StreamInfo) error {
+	shardFile := filepath.Join(m.basePath, fmt.Sprintf(shardFileTemplate, shardIndex))
+
+	file, err := os.Create(shardFile)
+	if err != nil {
+		return fmt.Errorf("failed to create shard file: %w", err)
+	}
+	defer file.Close()
+
+	encoder := json.NewEncoder(file)
+	if err := encoder.Encode(entries); err != nil {
+		return fmt.Errorf("failed to encode shard: %w", err)
+	}
+
+	return nil
+}
+
+func (m *SortingManager) GetSortedEntries(callback func(*StreamInfo)) error {
+	for shardIndex := 0; shardIndex < mutexShards; shardIndex++ {
+		index := uint64(shardIndex)
+		m.shardMap.Compute(index, func(oldVal *shardData, loaded bool) (*shardData, bool) {
+			if oldVal == nil {
+				return nil, false
+			}
+			if err := m.flushShard(index, oldVal); err != nil {
+				logger.Default.Errorf("failed to flush shard %d: %v", index, err)
+			}
+			return oldVal, false
+		})
+	}
+
+	entries := make([]*StreamInfo, 0, 1_000_000)
+
+	for shardIndex := 0; shardIndex < mutexShards; shardIndex++ {
+		shardFile := filepath.Join(m.basePath, fmt.Sprintf(shardFileTemplate, shardIndex))
+
+		file, err := os.Open(shardFile)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("failed to open shard %d: %w", shardIndex, err)
+		}
+
+		var shardData map[string]*StreamInfo
+		if err := json.NewDecoder(file).Decode(&shardData); err != nil {
+			file.Close()
+			return fmt.Errorf("failed to decode shard %d: %w", shardIndex, err)
+		}
+		file.Close()
+
+		for _, stream := range shardData {
+			entries = append(entries, stream)
+		}
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		iStream := entries[i]
+		jStream := entries[j]
+
+		var cmp int
+
+		switch m.sortingKey {
+		case "tvg-chno", "channel-id", "channel-number":
+			cmp = compareNumeric(iStream.TvgChNo, jStream.TvgChNo)
+		case "tvg-id":
+			cmp = compareNumeric(iStream.TvgID, jStream.TvgID)
+		case "source":
+			cmp = compareNumeric(iStream.SourceM3U, jStream.SourceM3U)
+		case "tvg-group", "group-title":
+			cmp = strings.Compare(
+				strings.ToLower(iStream.Group),
+				strings.ToLower(jStream.Group))
+		case "tvg-type":
+			cmp = strings.Compare(
+				strings.ToLower(iStream.TvgType),
+				strings.ToLower(jStream.TvgType))
+		default: // Title
+			cmp = strings.Compare(
+				strings.ToLower(iStream.Title),
+				strings.ToLower(jStream.Title))
+		}
+
+		if m.sortingDir == "desc" {
+			return cmp > 0
+		}
+		return cmp < 0
+	})
+
+	for _, entry := range entries {
+		callback(entry)
+	}
+
+	return nil
+}
+
+func mergeStreamInfoAttributes(base, new *StreamInfo) *StreamInfo {
+	if base.Title == "" {
+		base.Title = new.Title
+	}
+	if base.TvgID == "" {
+		base.TvgID = new.TvgID
+	}
+	if base.TvgChNo == "" {
+		base.TvgChNo = new.TvgChNo
+	}
+	if base.TvgType == "" {
+		base.TvgType = new.TvgType
+	}
+	if base.LogoURL == "" {
+		base.LogoURL = new.LogoURL
+	}
+	if base.Group == "" {
+		base.Group = new.Group
+	}
+
+	if base.URLs == nil {
+		base.URLs = xsync.NewMapOf[string, map[string]string]()
+	}
+
+	new.URLs.Range(func(key string, value map[string]string) bool {
+		_, _ = base.URLs.Compute(key, func(oldValue map[string]string, loaded bool) (newValue map[string]string, del bool) {
+			if oldValue == nil {
+				oldValue = value
+			} else {
+				for subKey, subValue := range value {
+					oldValue[subKey] = subValue
+				}
+			}
+
+			return oldValue, false
+		})
+
+		return true
+	})
+
+	if new.SourceM3U < base.SourceM3U || (new.SourceM3U == base.SourceM3U && new.SourceIndex < base.SourceIndex) {
+		base.SourceM3U = new.SourceM3U
+		base.SourceIndex = new.SourceIndex
+	}
+
+	return base
+}
+
+func sanitizeField(value string) string {
+	sanitized := strings.NewReplacer(
+		"/", "_",
+		"\\", "_",
+		":", "_",
+		"*", "_",
+		"?", "_",
+		"\"", "_",
+		"<", "_",
+		">", "_",
+		"|", "_",
+		" ", "",
+	).Replace(strings.TrimSpace(value))
+	sanitized = strings.ToLower(sanitized)
+
+	runes := []rune(sanitized)
+	if len(runes) > 100 {
+		sanitized = string(runes[:100])
+	}
+
+	return sanitized
+}
+
+func compareNumeric(a, b string) int {
+	aNum, aErr := strconv.Atoi(a)
+	bNum, bErr := strconv.Atoi(b)
+
+	if aErr == nil && bErr == nil {
+		if aNum < bNum {
+			return -1
+		} else if aNum > bNum {
+			return 1
+		}
+		return 0
+	}
+
+	return strings.Compare(a, b)
+}
+
