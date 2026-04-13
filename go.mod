@@ -4,7 +4,7 @@ go 1.25.6
 
 require (
 	github.com/cespare/xxhash v1.1.0
-	github.com/goccy/go-json v0.10.5
+	github.com/goccy/go-json v0.10.6
 	github.com/gofrs/flock v0.13.0
 	github.com/google/uuid v1.6.0
 	github.com/klauspost/compress v1.18.3
@@ -27,4 +27,3 @@ require (
 	github.com/rogpeppe/go-internal v1.14.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
