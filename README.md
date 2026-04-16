@@ -1,8 +1,9 @@
 # Windows M3U Stream Merger Proxy
 Forked from the upstream project by Son Roy Almerol and repackaged here as windows-m3u-stream-merger-proxy.
-<!-- ALL-CONTRIBUTORS-BADGE:START - Do not remove or modify this section -->
-[![All Contributors](https://img.shields.io/badge/all_contributors-5-orange.svg?style=flat-square)](#contributors-)
-<!-- ALL-CONTRIBUTORS-BADGE:END -->
+
+
+**ORIGINAL PROJECT DESCRIPTION:**
+
 
 > [!WARNING]  
 > This repo is currently in heavy development. Expect major changes on every release until the first stable release, `1.0.0`.
@@ -195,37 +196,5 @@ Customers sitting at different points around the belt:
 If a customer is too slow and takes too long to check a plate, the data might get replaced by the time they look again (buffer overwrite)
 
 This system ensures that streaming data (sushi) flows smoothly from the source (kitchen) to multiple consumers (customers) while efficiently managing memory (plates) and handling errors (food safety warnings).
-
-## Sponsors ✨
-Huge thanks to those who donated for the development of this project!
-
-<p align="left"><!-- markdownlint-disable-line --><!-- markdownlint-disable-next-line -->
-<!-- sponsors --><!-- sponsors -->
-</p>
-
-<p align="left"><!-- markdownlint-disable-line --><!-- markdownlint-disable-next-line -->
-<a href="https://github.com/kpirnie"><img src="https://github.com/kpirnie.png" width="50px" alt="kpirnie" /></a>&nbsp;&nbsp;<a href="https://github.com/jbumgard"><img src="https://github.com/jbumgard.png" width="50px" alt="jbumgard" /></a>&nbsp;&nbsp;<a href="https://github.com/aniel300"><img src="https://github.com/aniel300.png" width="50px" alt="aniel300" /></a>&nbsp;&nbsp;<a href="https://github.com/raf02"><img src="https://github.com/raf02.png" width="50px" alt="raf02" /></a>&nbsp;&nbsp;
-</p>
-
-## Contributors
-
-- Son Roy Almerol
-- Anders Josefsson
-- blackwhitebear8
-- Kevin Pirnie
-- TgSeed
-
-## Contributing
-
-First off, thanks for taking the time to contribute! ❤️
-
-All types of contributions are encouraged and valued. 🎉
-
-I'm currently looking to add more `tvg-*` tags that might be used by some IPTV providers. Feel free to post an issue if you require a specific tag!
-
-And if you like the project, but just don't have time to contribute, that's fine. There are other easy ways to support the project and show your appreciation, which I would also be very happy about:
-- Star the project
-- Tweet about it
-- Mention the project and tell your friends/colleagues
 
 
