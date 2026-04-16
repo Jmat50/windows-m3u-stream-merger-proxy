@@ -27,19 +27,19 @@ type LineDetails struct {
 
 func streamDownloadM3USources() chan *SourceDownloaderResult {
 	resultChan := make(chan *SourceDownloaderResult)
-	indexes := utils.GetM3UIndexes()
+	sources := utils.GetSourceConfigs()
 
 	go func() {
 		defer close(resultChan)
 		var wg sync.WaitGroup
 
-		for _, index := range indexes {
+		for _, source := range sources {
 			wg.Add(1)
-			go func(idx string) {
+			go func(source utils.SourceConfig) {
 				defer wg.Done()
 
 				result := &SourceDownloaderResult{
-					Index: idx,
+					Index: source.Index,
 					Lines: make(chan *LineDetails, 1000),
 					Error: make(chan error, 1),
 				}
@@ -48,9 +48,9 @@ func streamDownloadM3USources() chan *SourceDownloaderResult {
 					defer close(result.Lines)
 					defer close(result.Error)
 
-					m3uURL := os.Getenv(fmt.Sprintf("M3U_URL_%s", idx))
+					m3uURL := strings.TrimSpace(source.URL)
 					if m3uURL == "" {
-						result.Error <- fmt.Errorf("no URL configured for M3U index %s", idx)
+						result.Error <- fmt.Errorf("no URL configured for M3U index %s", source.Index)
 						return
 					}
 
@@ -59,11 +59,11 @@ func streamDownloadM3USources() chan *SourceDownloaderResult {
 						return
 					}
 
-					handleRemoteURL(m3uURL, idx, result)
+					handleRemoteURL(m3uURL, source.Index, result)
 				}()
 
 				resultChan <- result
-			}(index)
+			}(source)
 		}
 
 		wg.Wait()
@@ -163,4 +163,3 @@ func scanAndStream(r io.Reader, result *SourceDownloaderResult) {
 		result.Error <- fmt.Errorf("error reading content: %v", err)
 	}
 }
-

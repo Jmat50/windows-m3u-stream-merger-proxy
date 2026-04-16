@@ -61,6 +61,7 @@ DEFAULT_SETTINGS = {
     "exclude_title_filters": [],
     "channel_source_rules": [],
     "channel_merge_rules": [],
+    "web_discovery_jobs": [],
 }
 
 ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
@@ -295,6 +296,7 @@ class DesktopApp(tk.Tk):
         self.exclude_title_filters: list[str] = []
         self.channel_source_rules: list[dict[str, object]] = []
         self.channel_merge_rules: list[dict[str, str]] = []
+        self.web_discovery_jobs: list[dict[str, object]] = []
         self.sources_items: list[dict[str, str]] = []
         self.source_action_icons: dict[str, tk.PhotoImage] = {}
         self.channel_source_reorder_callback: Callable[[], None] | None = None
@@ -546,13 +548,16 @@ class DesktopApp(tk.Tk):
         ttk.Button(controls, text="Channel Settings", command=self._open_channel_settings_popup).grid(
             row=0, column=2, padx=(0, 8)
         )
-        ttk.Button(controls, text="Export Backup", command=self._export_backup_clicked).grid(
+        ttk.Button(controls, text="Web Discovery", command=self._open_web_discovery_popup).grid(
             row=0, column=3, padx=(0, 8)
         )
-        ttk.Button(controls, text="Load Backup", command=self._load_backup_clicked).grid(row=0, column=4, padx=(0, 8))
-        ttk.Button(controls, text="Open Playlist", command=self._open_playlist_clicked).grid(row=0, column=5, padx=(0, 8))
-        ttk.Button(controls, text="Open Data Folder", command=self._open_data_folder_clicked).grid(row=0, column=6, padx=(0, 8))
-        ttk.Button(controls, text="Error Log", command=self._open_error_log_clicked).grid(row=0, column=7)
+        ttk.Button(controls, text="Export Backup", command=self._export_backup_clicked).grid(
+            row=0, column=4, padx=(0, 8)
+        )
+        ttk.Button(controls, text="Load Backup", command=self._load_backup_clicked).grid(row=0, column=5, padx=(0, 8))
+        ttk.Button(controls, text="Open Playlist", command=self._open_playlist_clicked).grid(row=0, column=6, padx=(0, 8))
+        ttk.Button(controls, text="Open Data Folder", command=self._open_data_folder_clicked).grid(row=0, column=7, padx=(0, 8))
+        ttk.Button(controls, text="Error Log", command=self._open_error_log_clicked).grid(row=0, column=8)
 
         status_frame = ttk.LabelFrame(root, text="Server Status", padding=8)
         status_frame.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(10, 4))
@@ -683,6 +688,8 @@ class DesktopApp(tk.Tk):
             settings["channel_source_rules"] = []
         if not isinstance(settings.get("channel_merge_rules"), list):
             settings["channel_merge_rules"] = []
+        if not isinstance(settings.get("web_discovery_jobs"), list):
+            settings["web_discovery_jobs"] = []
 
         return settings
 
@@ -715,6 +722,7 @@ class DesktopApp(tk.Tk):
         self.exclude_title_filters = self._normalize_filter_list(settings.get("exclude_title_filters"))
         self.channel_source_rules = self._normalize_channel_source_rules(settings.get("channel_source_rules"))
         self.channel_merge_rules = self._normalize_channel_merge_rules(settings.get("channel_merge_rules"))
+        self.web_discovery_jobs = self._normalize_web_discovery_jobs(settings.get("web_discovery_jobs"))
 
     def _reset_settings_to_defaults_clicked(self) -> None:
         self._apply_settings_to_ui(DEFAULT_SETTINGS)
@@ -813,6 +821,55 @@ class DesktopApp(tk.Tk):
                 url = item.strip()
                 if url:
                     output.append({"name": f"Source {index}", "url": url, "concurrency": "1"})
+
+        return output
+
+    def _normalize_web_discovery_jobs(self, value: object) -> list[dict[str, object]]:
+        if not isinstance(value, list):
+            return []
+
+        def _positive_int(raw: object, default: int) -> int:
+            try:
+                parsed = int(str(raw).strip())
+            except (TypeError, ValueError):
+                return default
+            return parsed if parsed > 0 else default
+
+        def _nonnegative_int(raw: object, default: int) -> int:
+            try:
+                parsed = int(str(raw).strip())
+            except (TypeError, ValueError):
+                return default
+            return parsed if parsed >= 0 else default
+
+        output: list[dict[str, object]] = []
+        for index, item in enumerate(value, start=1):
+            if not isinstance(item, dict):
+                continue
+
+            start_url = str(item.get("start_url", "")).strip()
+            if not start_url:
+                continue
+
+            recursive = bool(item.get("recursive", True))
+            max_depth = _nonnegative_int(item.get("max_depth", 2), 2)
+            if not recursive:
+                max_depth = 0
+
+            output.append(
+                {
+                    "name": str(item.get("name", "")).strip() or f"Web Discovery {index}",
+                    "start_url": start_url,
+                    "scan_interval_minutes": _positive_int(item.get("scan_interval_minutes", 60), 60),
+                    "recursive": recursive,
+                    "max_depth": max_depth,
+                    "max_pages": _positive_int(item.get("max_pages", 150), 150),
+                    "include_subdomains": bool(item.get("include_subdomains", False)),
+                    "follow_robots": bool(item.get("follow_robots", True)),
+                    "source_concurrency": _positive_int(item.get("source_concurrency", 1), 1),
+                    "enabled": bool(item.get("enabled", True)),
+                }
+            )
 
         return output
 
@@ -1019,6 +1076,327 @@ class DesktopApp(tk.Tk):
             return
 
         self._restart_server_if_running("Source order changed.")
+
+    def _open_web_discovery_popup(self) -> None:
+        popup = tk.Toplevel(self)
+        popup.title("Web Discovery")
+        popup.geometry("1040x640")
+        popup.minsize(920, 560)
+        popup.transient(self)
+        popup.grab_set()
+
+        jobs: list[dict[str, object]] = [dict(job) for job in self.web_discovery_jobs]
+
+        root = ttk.Frame(popup, padding=12)
+        root.pack(fill=tk.BOTH, expand=True)
+        root.columnconfigure(0, weight=1)
+        root.rowconfigure(1, weight=1)
+
+        ttk.Label(
+            root,
+            text=(
+                "Scan a site for M3U and M3U8 playlists using the backend discovery engine. "
+                "Jobs can recurse through same-site links, read sitemaps, and rescan on their own interval."
+            ),
+            wraplength=980,
+            justify=tk.LEFT,
+        ).grid(row=0, column=0, sticky="ew")
+
+        content = ttk.Frame(root)
+        content.grid(row=1, column=0, sticky="nsew", pady=(12, 0))
+        content.columnconfigure(0, weight=1)
+        content.rowconfigure(0, weight=1)
+
+        tree_frame = ttk.Frame(content)
+        tree_frame.grid(row=0, column=0, sticky="nsew")
+        tree_frame.columnconfigure(0, weight=1)
+        tree_frame.rowconfigure(0, weight=1)
+
+        jobs_tree = ttk.Treeview(
+            tree_frame,
+            columns=("name", "start_url", "interval", "mode", "status"),
+            show="headings",
+            selectmode="browse",
+            height=14,
+        )
+        jobs_tree.heading("name", text="Job Name")
+        jobs_tree.heading("start_url", text="Start URL")
+        jobs_tree.heading("interval", text="Interval")
+        jobs_tree.heading("mode", text="Mode")
+        jobs_tree.heading("status", text="Status")
+        jobs_tree.column("name", width=180, anchor=tk.W, stretch=False)
+        jobs_tree.column("start_url", width=460, anchor=tk.W, stretch=True)
+        jobs_tree.column("interval", width=90, anchor=tk.CENTER, stretch=False)
+        jobs_tree.column("mode", width=110, anchor=tk.CENTER, stretch=False)
+        jobs_tree.column("status", width=90, anchor=tk.CENTER, stretch=False)
+        jobs_tree.grid(row=0, column=0, sticky="nsew")
+        jobs_scroll_y = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=jobs_tree.yview)
+        jobs_scroll_y.grid(row=0, column=1, sticky="ns")
+        jobs_tree.configure(yscrollcommand=jobs_scroll_y.set)
+
+        summary_var = tk.StringVar(value="No discovery jobs configured yet.")
+        ttk.Label(root, textvariable=summary_var, wraplength=980, justify=tk.LEFT).grid(
+            row=2, column=0, sticky="ew", pady=(10, 0)
+        )
+
+        footer = ttk.Frame(root)
+        footer.grid(row=3, column=0, sticky="ew", pady=(14, 0))
+
+        def selected_index() -> int | None:
+            selected = jobs_tree.selection()
+            if not selected:
+                return None
+            try:
+                index = int(selected[0])
+            except ValueError:
+                return None
+            if 0 <= index < len(jobs):
+                return index
+            return None
+
+        def describe_job(job: dict[str, object]) -> str:
+            mode = "recursive" if bool(job.get("recursive", True)) else "single page"
+            subdomains = "with subdomains" if bool(job.get("include_subdomains", False)) else "same host only"
+            robots_text = "respecting robots.txt" if bool(job.get("follow_robots", True)) else "ignoring robots.txt"
+            enabled_text = "enabled" if bool(job.get("enabled", True)) else "disabled"
+            return (
+                f"{job.get('name', 'Web Discovery')} scans {job.get('start_url', '')} every "
+                f"{job.get('scan_interval_minutes', 60)} minute(s), runs in {mode} mode, crawls {subdomains}, "
+                f"stops after {job.get('max_pages', 150)} pages, and is currently {enabled_text} while {robots_text}."
+            )
+
+        def refresh_tree(select_index: int | None = None) -> None:
+            for item_id in jobs_tree.get_children():
+                jobs_tree.delete(item_id)
+
+            for index, job in enumerate(jobs):
+                interval = f"{job.get('scan_interval_minutes', 60)} min"
+                mode = "Recursive" if bool(job.get("recursive", True)) else "Single Page"
+                status = "Enabled" if bool(job.get("enabled", True)) else "Disabled"
+                jobs_tree.insert(
+                    "",
+                    tk.END,
+                    iid=str(index),
+                    values=(
+                        str(job.get("name", "")).strip(),
+                        str(job.get("start_url", "")).strip(),
+                        interval,
+                        mode,
+                        status,
+                    ),
+                )
+
+            if select_index is not None and 0 <= select_index < len(jobs):
+                item_id = str(select_index)
+                jobs_tree.selection_set(item_id)
+                jobs_tree.focus(item_id)
+                jobs_tree.see(item_id)
+
+            index = selected_index()
+            if index is None:
+                summary_var.set("No discovery job selected. Add one to start scanning a site for M3U links.")
+                return
+            summary_var.set(describe_job(jobs[index]))
+
+        def open_job_editor(edit_index: int | None = None) -> None:
+            job = dict(jobs[edit_index]) if edit_index is not None and 0 <= edit_index < len(jobs) else {}
+            editor = tk.Toplevel(popup)
+            editor.title("Edit Discovery Job" if edit_index is not None else "Add Discovery Job")
+            editor.geometry("640x420")
+            editor.minsize(560, 380)
+            editor.transient(popup)
+            editor.grab_set()
+
+            frame = ttk.Frame(editor, padding=12)
+            frame.pack(fill=tk.BOTH, expand=True)
+            frame.columnconfigure(1, weight=1)
+
+            name_var = tk.StringVar(value=str(job.get("name", "")).strip() or f"Web Discovery {len(jobs) + 1}")
+            start_url_var = tk.StringVar(value=str(job.get("start_url", "")).strip())
+            interval_var = tk.StringVar(value=str(job.get("scan_interval_minutes", 60)))
+            recursive_var = tk.BooleanVar(value=bool(job.get("recursive", True) if job else True))
+            max_depth_var = tk.StringVar(value=str(job.get("max_depth", 2 if recursive_var.get() else 0)))
+            max_pages_var = tk.StringVar(value=str(job.get("max_pages", 150)))
+            subdomains_var = tk.BooleanVar(value=bool(job.get("include_subdomains", False)))
+            robots_var = tk.BooleanVar(value=bool(job.get("follow_robots", True) if job else True))
+            source_concurrency_var = tk.StringVar(value=str(job.get("source_concurrency", 1)))
+            enabled_var = tk.BooleanVar(value=bool(job.get("enabled", True) if job else True))
+
+            ttk.Label(frame, text="Job Name").grid(row=0, column=0, sticky="w")
+            name_entry = ttk.Entry(frame, textvariable=name_var)
+            name_entry.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+
+            ttk.Label(frame, text="Start URL").grid(row=1, column=0, sticky="w", pady=(10, 0))
+            start_url_entry = ttk.Entry(frame, textvariable=start_url_var)
+            start_url_entry.grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=(10, 0))
+
+            ttk.Label(frame, text="Scan Interval (min)").grid(row=2, column=0, sticky="w", pady=(10, 0))
+            ttk.Entry(frame, textvariable=interval_var, width=10).grid(row=2, column=1, sticky="w", padx=(8, 0), pady=(10, 0))
+
+            ttk.Label(frame, text="Max Depth").grid(row=3, column=0, sticky="w", pady=(10, 0))
+            max_depth_entry = ttk.Entry(frame, textvariable=max_depth_var, width=10)
+            max_depth_entry.grid(row=3, column=1, sticky="w", padx=(8, 0), pady=(10, 0))
+
+            ttk.Label(frame, text="Max Pages").grid(row=4, column=0, sticky="w", pady=(10, 0))
+            ttk.Entry(frame, textvariable=max_pages_var, width=10).grid(row=4, column=1, sticky="w", padx=(8, 0), pady=(10, 0))
+
+            ttk.Label(frame, text="Discovered Source Concurrency").grid(row=5, column=0, sticky="w", pady=(10, 0))
+            ttk.Entry(frame, textvariable=source_concurrency_var, width=10).grid(
+                row=5, column=1, sticky="w", padx=(8, 0), pady=(10, 0)
+            )
+
+            checks = ttk.Frame(frame)
+            checks.grid(row=6, column=0, columnspan=2, sticky="w", pady=(14, 0))
+            ttk.Checkbutton(checks, text="Enabled", variable=enabled_var).grid(row=0, column=0, sticky="w", padx=(0, 12))
+            ttk.Checkbutton(checks, text="Recursive Crawl", variable=recursive_var).grid(
+                row=0, column=1, sticky="w", padx=(0, 12)
+            )
+            ttk.Checkbutton(checks, text="Include Subdomains", variable=subdomains_var).grid(
+                row=0, column=2, sticky="w", padx=(0, 12)
+            )
+            ttk.Checkbutton(checks, text="Respect robots.txt", variable=robots_var).grid(row=0, column=3, sticky="w")
+
+            ttk.Label(
+                frame,
+                text=(
+                    "Recursive crawl follows same-site links. Max Depth counts link levels from the start URL. "
+                    "Sitemap discovery runs automatically when available."
+                ),
+                wraplength=600,
+                foreground="#4f4f4f",
+                justify=tk.LEFT,
+            ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(12, 0))
+
+            def sync_depth_state() -> None:
+                if recursive_var.get():
+                    max_depth_entry.state(["!disabled"])
+                    if not str(max_depth_var.get()).strip():
+                        max_depth_var.set("2")
+                else:
+                    max_depth_entry.state(["disabled"])
+                    max_depth_var.set("0")
+
+            def save_job() -> None:
+                start_url = start_url_var.get().strip()
+                if not start_url:
+                    self._show_error("Invalid Discovery Job", "Start URL is required.")
+                    return
+
+                parsed = urllib.parse.urlparse(start_url)
+                if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                    self._show_error("Invalid Discovery Job", "Start URL must be a valid http or https URL.")
+                    return
+
+                try:
+                    interval = int(interval_var.get().strip() or "60")
+                    max_depth = int(max_depth_var.get().strip() or "0")
+                    max_pages = int(max_pages_var.get().strip() or "150")
+                    source_concurrency = int(source_concurrency_var.get().strip() or "1")
+                except ValueError:
+                    self._show_error("Invalid Discovery Job", "Interval, depth, pages, and concurrency must be integers.")
+                    return
+
+                if interval < 1:
+                    self._show_error("Invalid Discovery Job", "Scan interval must be at least 1 minute.")
+                    return
+                if max_depth < 0:
+                    self._show_error("Invalid Discovery Job", "Max depth cannot be negative.")
+                    return
+                if max_pages < 1:
+                    self._show_error("Invalid Discovery Job", "Max pages must be at least 1.")
+                    return
+                if source_concurrency < 1:
+                    self._show_error("Invalid Discovery Job", "Source concurrency must be at least 1.")
+                    return
+
+                recursive = bool(recursive_var.get())
+                job_payload: dict[str, object] = {
+                    "name": name_var.get().strip() or f"Web Discovery {len(jobs) + 1}",
+                    "start_url": start_url,
+                    "scan_interval_minutes": interval,
+                    "recursive": recursive,
+                    "max_depth": max_depth if recursive else 0,
+                    "max_pages": max_pages,
+                    "include_subdomains": bool(subdomains_var.get()),
+                    "follow_robots": bool(robots_var.get()),
+                    "source_concurrency": source_concurrency,
+                    "enabled": bool(enabled_var.get()),
+                }
+
+                normalized = self._normalize_web_discovery_jobs([job_payload])
+                if not normalized:
+                    self._show_error("Invalid Discovery Job", "This job could not be saved. Check the configured values.")
+                    return
+
+                if edit_index is None:
+                    jobs.append(normalized[0])
+                    select_index = len(jobs) - 1
+                else:
+                    jobs[edit_index] = normalized[0]
+                    select_index = edit_index
+
+                refresh_tree(select_index=select_index)
+                editor.destroy()
+
+            footer_row = ttk.Frame(frame)
+            footer_row.grid(row=8, column=0, columnspan=2, sticky="e", pady=(18, 0))
+            ttk.Button(footer_row, text="Cancel", command=editor.destroy).pack(side=tk.LEFT, padx=(0, 8))
+            ttk.Button(footer_row, text="Save Job", command=save_job).pack(side=tk.LEFT)
+
+            recursive_var.trace_add("write", lambda *_args: sync_depth_state())
+            sync_depth_state()
+            editor.bind("<Return>", lambda event: save_job())
+            editor.bind("<Escape>", lambda event: editor.destroy())
+            name_entry.focus_set()
+            name_entry.selection_range(0, tk.END)
+
+        def add_job() -> None:
+            open_job_editor()
+
+        def edit_job() -> None:
+            index = selected_index()
+            if index is None:
+                self._show_error("No Discovery Job Selected", "Select a discovery job to edit.")
+                return
+            open_job_editor(edit_index=index)
+
+        def remove_job() -> None:
+            index = selected_index()
+            if index is None:
+                self._show_error("No Discovery Job Selected", "Select a discovery job to remove.")
+                return
+            removed = jobs.pop(index)
+            refresh_tree(select_index=min(index, len(jobs) - 1) if jobs else None)
+            self._set_last_event(f"Removed discovery job '{removed.get('name', 'Web Discovery')}'.")
+
+        actions = ttk.Frame(footer)
+        actions.pack(side=tk.LEFT)
+        ttk.Button(actions, text="Add Job", command=add_job).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(actions, text="Edit Job", command=edit_job).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(actions, text="Remove Job", command=remove_job).pack(side=tk.LEFT)
+
+        def save_popup_settings() -> None:
+            self.web_discovery_jobs = self._normalize_web_discovery_jobs(jobs)
+
+            try:
+                settings = self._collect_settings()
+                self._persist_settings(settings, sync_start_on_boot=True, show_dialogs=False, log_event=False)
+            except Exception as exc:  # noqa: BLE001
+                self._show_error("Invalid Settings", str(exc))
+                return
+
+            self._append_log("[APP] Web discovery settings saved.")
+            self._restart_server_if_running("Web discovery settings changed.")
+            popup.destroy()
+
+        footer_buttons = ttk.Frame(footer)
+        footer_buttons.pack(side=tk.RIGHT)
+        ttk.Button(footer_buttons, text="Cancel", command=popup.destroy).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(footer_buttons, text="Save", command=save_popup_settings).pack(side=tk.LEFT)
+
+        jobs_tree.bind("<<TreeviewSelect>>", lambda event: refresh_tree())
+        jobs_tree.bind("<Double-1>", lambda event: edit_job())
+        refresh_tree(select_index=0 if jobs else None)
 
     def _normalize_channel_source_rules(self, value: object) -> list[dict[str, object]]:
         if not isinstance(value, list):
@@ -2262,6 +2640,7 @@ class DesktopApp(tk.Tk):
             "exclude_title_filters": list(self.exclude_title_filters),
             "channel_source_rules": list(self.channel_source_rules),
             "channel_merge_rules": list(self.channel_merge_rules),
+            "web_discovery_jobs": [dict(job) for job in self.web_discovery_jobs],
         }
 
     def _persist_settings(
@@ -2823,6 +3202,7 @@ class DesktopApp(tk.Tk):
                 or key.startswith("EXCLUDE_TITLE_")
                 or key.startswith("CHANNEL_SOURCES_")
                 or key.startswith("CHANNEL_MERGE_")
+                or key.startswith("DISCOVERY_JOB_")
             ):
                 env.pop(key, None)
 
@@ -2905,12 +3285,22 @@ class DesktopApp(tk.Tk):
         for index, rule in enumerate(channel_merge_rules, start=1):
             env[f"CHANNEL_MERGE_{index}"] = f"{rule['source']}|{rule['target']}"
 
+        for index, job in enumerate(settings.get("web_discovery_jobs", []), start=1):
+            payload = self._normalize_web_discovery_jobs([job])
+            if not payload:
+                continue
+            env[f"DISCOVERY_JOB_{index}"] = json.dumps(payload[0], separators=(",", ":"), sort_keys=True)
+
+        discovery_job_count = len(self._normalize_web_discovery_jobs(settings.get("web_discovery_jobs", [])))
+
         if channel_merge_rules:
             self._append_log(
                 "[APP] Applying "
                 f"{len(channel_merge_rules)} channel merge rule(s) with "
                 f"{len(effective_exclude_patterns)} effective exclude title filter(s)."
             )
+        if discovery_job_count:
+            self._append_log(f"[APP] Starting server with {discovery_job_count} web discovery job(s).")
 
         creation_flags = 0
         if os.name == "nt":
@@ -3179,6 +3569,7 @@ class DesktopApp(tk.Tk):
             "exclude_title_filters": list(self.exclude_title_filters),
             "channel_source_rules": list(self.channel_source_rules),
             "channel_merge_rules": list(self.channel_merge_rules),
+            "web_discovery_jobs": [dict(job) for job in self.web_discovery_jobs],
         }
 
     def _write_error_report(self, reason: str) -> None:

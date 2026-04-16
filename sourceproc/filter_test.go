@@ -5,6 +5,28 @@ import (
 	"testing"
 )
 
+func setChannelMergesForTest(t *testing.T, merges map[string]string) {
+	originalIncludeRegexes := includeRegexes
+	originalExcludeRegexes := excludeRegexes
+	originalRules := channelRules
+	originalMerges := channelMerges
+
+	t.Cleanup(func() {
+		includeRegexes = originalIncludeRegexes
+		excludeRegexes = originalExcludeRegexes
+		channelRules = originalRules
+		channelMerges = originalMerges
+		filterOnce = sync.Once{}
+	})
+
+	includeRegexes = nil
+	excludeRegexes = nil
+	channelRules = nil
+	channelMerges = merges
+	filterOnce = sync.Once{}
+	filterOnce.Do(func() {})
+}
+
 func TestParseChannelSourceRules(t *testing.T) {
 	rules := parseChannelSourceRules([]string{
 		`^ESPN$|1,2`,
@@ -97,21 +119,12 @@ func TestParseChannelMergeRules(t *testing.T) {
 }
 
 func TestApplyChannelMergeRule(t *testing.T) {
-	originalOnce := filterOnce
-	originalMerges := channelMerges
-	t.Cleanup(func() {
-		filterOnce = originalOnce
-		channelMerges = originalMerges
-	})
-
-	filterOnce = sync.Once{}
-	filterOnce.Do(func() {})
-	channelMerges = map[string]string{
+	setChannelMergesForTest(t, map[string]string{
 		normalizeChannelMergeKey("espn2"):       "ESPN 2 US",
 		normalizeChannelMergeKey("espn 2 us"):   "ESPN",
 		normalizeChannelMergeKey("news alpha"):  "News Global",
 		normalizeChannelMergeKey("news global"): "News Global HD",
-	}
+	})
 
 	if got := applyChannelMergeRule("ESPN2"); got != "ESPN" {
 		t.Fatalf("expected chained merge result ESPN, got %q", got)
@@ -125,19 +138,10 @@ func TestApplyChannelMergeRule(t *testing.T) {
 }
 
 func TestApplyChannelMergeRuleCycle(t *testing.T) {
-	originalOnce := filterOnce
-	originalMerges := channelMerges
-	t.Cleanup(func() {
-		filterOnce = originalOnce
-		channelMerges = originalMerges
-	})
-
-	filterOnce = sync.Once{}
-	filterOnce.Do(func() {})
-	channelMerges = map[string]string{
+	setChannelMergesForTest(t, map[string]string{
 		normalizeChannelMergeKey("alpha"): "Bravo",
 		normalizeChannelMergeKey("bravo"): "Alpha",
-	}
+	})
 
 	if got := applyChannelMergeRule("Alpha"); got != "Alpha" {
 		t.Fatalf("expected cyclic rule to preserve original title, got %q", got)
@@ -145,18 +149,9 @@ func TestApplyChannelMergeRuleCycle(t *testing.T) {
 }
 
 func TestApplyChannelMergeRuleWhitespaceNormalization(t *testing.T) {
-	originalOnce := filterOnce
-	originalMerges := channelMerges
-	t.Cleanup(func() {
-		filterOnce = originalOnce
-		channelMerges = originalMerges
-	})
-
-	filterOnce = sync.Once{}
-	filterOnce.Do(func() {})
-	channelMerges = map[string]string{
+	setChannelMergesForTest(t, map[string]string{
 		normalizeChannelMergeKey("cartoon network usa eastern feed"): "Cartoon Network",
-	}
+	})
 
 	if got := applyChannelMergeRule("  Cartoon   Network   USA  Eastern Feed "); got != "Cartoon Network" {
 		t.Fatalf("expected normalized whitespace merge result Cartoon Network, got %q", got)
@@ -164,18 +159,9 @@ func TestApplyChannelMergeRuleWhitespaceNormalization(t *testing.T) {
 }
 
 func TestApplyChannelMergeRulePunctuationNormalization(t *testing.T) {
-	originalOnce := filterOnce
-	originalMerges := channelMerges
-	t.Cleanup(func() {
-		filterOnce = originalOnce
-		channelMerges = originalMerges
-	})
-
-	filterOnce = sync.Once{}
-	filterOnce.Do(func() {})
-	channelMerges = map[string]string{
+	setChannelMergesForTest(t, map[string]string{
 		normalizeChannelMergeKey("Vice TV"): "VICE",
-	}
+	})
 
 	if got := applyChannelMergeRule("Vice-TV"); got != "VICE" {
 		t.Fatalf("expected punctuation-normalized merge result VICE, got %q", got)

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,26 +19,49 @@ import (
 	"windows-m3u-stream-merger-proxy/sourceproc"
 )
 
-// responseWriterPiper implements http.ResponseWriter and pipes the body to an io.PipeWriter.
-type responseWriterPiper struct {
-	pw     *io.PipeWriter
+type countingResponseWriter struct {
+	mu     sync.Mutex
 	header http.Header
 	status int
+	bytes  int
 }
 
-func (rw *responseWriterPiper) Header() http.Header {
+func newCountingResponseWriter() *countingResponseWriter {
+	return &countingResponseWriter{
+		header: make(http.Header),
+	}
+}
+
+func (rw *countingResponseWriter) Header() http.Header {
 	return rw.header
 }
 
-func (rw *responseWriterPiper) Write(data []byte) (int, error) {
+func (rw *countingResponseWriter) Write(data []byte) (int, error) {
+	rw.mu.Lock()
+	defer rw.mu.Unlock()
+
 	if rw.status == 0 {
-		rw.WriteHeader(http.StatusOK)
+		rw.status = http.StatusOK
 	}
-	return rw.pw.Write(data)
+	rw.bytes += len(data)
+	return len(data), nil
 }
 
-func (rw *responseWriterPiper) WriteHeader(statusCode int) {
-	rw.status = statusCode
+func (rw *countingResponseWriter) WriteHeader(statusCode int) {
+	rw.mu.Lock()
+	defer rw.mu.Unlock()
+
+	if rw.status == 0 {
+		rw.status = statusCode
+	}
+}
+
+func (rw *countingResponseWriter) Flush() {}
+
+func (rw *countingResponseWriter) Snapshot() (status int, bytes int) {
+	rw.mu.Lock()
+	defer rw.mu.Unlock()
+	return rw.status, rw.bytes
 }
 
 func TestStreamHTTPHandler(t *testing.T) {
@@ -46,11 +70,13 @@ func TestStreamHTTPHandler(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp directory: %v", err)
 	}
+	originalConfig := config.GetConfig()
 	defer func() {
 		t.Log("Cleaning up temporary directory:", tempDir)
-		//if err := os.RemoveAll(tempDir); err != nil {
-		//	t.Errorf("Failed to cleanup temp directory: %v", err)
-		//}
+		config.SetConfig(originalConfig)
+		if err := os.RemoveAll(tempDir); err != nil {
+			t.Errorf("Failed to cleanup temp directory: %v", err)
+		}
 	}()
 
 	// Set up test environment
@@ -79,14 +105,61 @@ func TestStreamHTTPHandler(t *testing.T) {
 	)
 
 	// Set up test environment variables
-	m3uURL := "https://gist.githubusercontent.com/sonroyaalmerol/64ce9eddf169366b29bf621b4370ec02/raw/d23e3c43f1961d946c6851a714af2809e21dc3b9/test-m3u.m3u"
+	packet := strings.Repeat("A", 64*1024)
+	var sourceServer *httptest.Server
+	sourceServer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/source.m3u":
+			w.Header().Set("Content-Type", "application/x-mpegURL")
+			_, _ = io.WriteString(w, "#EXTM3U\n#EXTINF:-1 tvg-id=\"test-channel\" group-title=\"Test\",Test Channel\n"+sourceServer.URL+"/stream.ts\n")
+		case "/stream.ts":
+			w.Header().Set("Content-Type", "video/mp2t")
+			w.Header().Set("Connection", "close")
+			flusher, _ := w.(http.Flusher)
+			ticker := time.NewTicker(25 * time.Millisecond)
+			defer ticker.Stop()
+			writeChunk := func() bool {
+				if _, err := io.WriteString(w, packet); err != nil {
+					return false
+				}
+				if flusher != nil {
+					flusher.Flush()
+				}
+				return true
+			}
+
+			if !writeChunk() {
+				return
+			}
+
+			for i := 0; i < 24; i++ {
+				select {
+				case <-r.Context().Done():
+					return
+				case <-ticker.C:
+					if !writeChunk() {
+						return
+					}
+				}
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer sourceServer.Close()
+
+	m3uURL := sourceServer.URL + "/source.m3u"
 	t.Log("Setting M3U_URL_1:", m3uURL)
+	t.Setenv("HTTP_PROXY", "")
+	t.Setenv("HTTPS_PROXY", "")
+	t.Setenv("ALL_PROXY", "")
+	t.Setenv("NO_PROXY", "*")
 	t.Setenv("M3U_URL_1", m3uURL)
 	t.Setenv("DEBUG", "true")
 
 	// Test M3U playlist generation
 	t.Log("Testing M3U playlist generation")
-	m3uReq := httptest.NewRequest(http.MethodGet, "/playlist.m3u", nil)
+	m3uReq := httptest.NewRequest(http.MethodGet, "http://proxy.test/playlist.m3u", nil)
 	m3uW := httptest.NewRecorder()
 
 	processor := sourceproc.NewProcessor()
@@ -98,7 +171,7 @@ func TestStreamHTTPHandler(t *testing.T) {
 
 	m3uHandler.ServeHTTP(m3uW, m3uReq)
 
-	m3uReq = httptest.NewRequest(http.MethodGet, "/playlist.m3u", nil)
+	m3uReq = httptest.NewRequest(http.MethodGet, "http://proxy.test/playlist.m3u", nil)
 	m3uW = httptest.NewRecorder()
 	m3uHandler.ServeHTTP(m3uW, m3uReq)
 	if m3uW.Code != http.StatusOK {
@@ -119,97 +192,86 @@ func TestStreamHTTPHandler(t *testing.T) {
 		}
 	}
 
-	// Track if at least one stream passes
-	var streamPassed bool
-
 	file, err := os.Open(processor.GetResultPath())
 	if err != nil {
-		t.Error(err)
+		t.Fatal(err)
 	}
 	defer file.Close()
 
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 
+	var streamURL string
 	for scanner.Scan() {
-		success := true // Track success for this stream
 		line := scanner.Text()
-		if isUrl := strings.HasPrefix(line, "http"); isUrl {
-			t.Run(line, func(t *testing.T) {
-				req := httptest.NewRequest(http.MethodGet, line, nil)
-				pr, pw := io.Pipe()
-				defer pr.Close()
-
-				rw := &responseWriterPiper{
-					pw:     pw,
-					header: make(http.Header),
-				}
-
-				// Create a channel to coordinate test completion
-				done := make(chan struct{})
-
-				// Start the stream handler in a goroutine
-				go func() {
-					streamHandler.ServeHTTP(rw, req)
-					close(done)
-				}()
-
-				// Read and compare streams for a set duration
-				testDuration := 2 * time.Second
-				timer := time.NewTimer(testDuration)
-
-				buffer2 := make([]byte, 32*1024)
-
-				var totalBytes2 int64
-
-				for {
-					select {
-					case <-timer.C:
-						t.Logf("Test completed after %v", testDuration)
-						t.Logf("Total bytes read: %d", totalBytes2)
-						if totalBytes2 == 0 {
-							t.Logf("No data received from one or both streams")
-							success = false
-						}
-						return
-					default:
-						// Read from response stream
-						n2, err2 := pr.Read(buffer2)
-						if err2 != nil && err2 != io.EOF {
-							t.Logf("Error reading response stream: %v", err2)
-							success = false
-							return
-						}
-
-						if n2 > 0 {
-							totalBytes2 += int64(n2)
-						}
-
-						// Verify data is being received
-						if n2 > 0 {
-							t.Logf("Received data: %d bytes", n2)
-						}
-
-						// Small delay to prevent tight loop
-						time.Sleep(10 * time.Millisecond)
-					}
-				}
-			})
-
-			if success {
-				streamPassed = true
-				break // Exit after first successful stream
-			}
+		if strings.HasPrefix(line, "http") {
+			streamURL = line
+			break
 		}
 	}
 
 	if err := scanner.Err(); err != nil {
 		t.Error(err)
 	}
-
-	// Only fail if no streams passed
-	if !streamPassed {
-		t.Error("No streams passed the test")
+	if streamURL == "" {
+		t.Fatal("No proxied stream URL found in generated playlist")
 	}
-}
 
+	t.Run(streamURL, func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+		defer cancel()
+
+		req := httptest.NewRequest(http.MethodGet, streamURL, nil).WithContext(ctx)
+		recorder := newCountingResponseWriter()
+
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			streamHandler.ServeHTTP(recorder, req)
+		}()
+
+		testDuration := 2 * time.Second
+		timer := time.NewTimer(testDuration)
+		defer timer.Stop()
+		pollTicker := time.NewTicker(50 * time.Millisecond)
+		defer pollTicker.Stop()
+
+		for {
+			select {
+			case <-pollTicker.C:
+				status, bytesRead := recorder.Snapshot()
+				if bytesRead == 0 {
+					continue
+				}
+				cancel()
+				select {
+				case <-done:
+				case <-time.After(2 * time.Second):
+					t.Fatal("Timed out waiting for stream handler to stop")
+				}
+				t.Logf("Received data: %d bytes", bytesRead)
+				if status != http.StatusOK {
+					t.Fatalf("Expected proxied stream status %d, got %d", http.StatusOK, status)
+				}
+				return
+			case <-timer.C:
+				cancel()
+				select {
+				case <-done:
+				case <-time.After(2 * time.Second):
+					t.Fatal("Timed out waiting for stream handler to stop")
+				}
+				status, bytesRead := recorder.Snapshot()
+				t.Logf("Test completed after %v", testDuration)
+				t.Logf("Total bytes read: %d", bytesRead)
+				if bytesRead == 0 {
+					t.Fatal("No data received from proxied stream")
+				}
+				if status != http.StatusOK {
+					t.Fatalf("Expected proxied stream status %d, got %d", http.StatusOK, status)
+				}
+				return
+			}
+		}
+	})
+}

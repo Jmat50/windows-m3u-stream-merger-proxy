@@ -1,11 +1,9 @@
 package store
 
 import (
-	"fmt"
-	"windows-m3u-stream-merger-proxy/logger"
-	"os"
-	"strconv"
 	"sync/atomic"
+	"windows-m3u-stream-merger-proxy/logger"
+	"windows-m3u-stream-merger-proxy/utils"
 
 	"github.com/puzpuzpuz/xsync/v3"
 )
@@ -29,12 +27,7 @@ func (cm *ConcurrencyManager) getMaxConcurrency(m3uIndex string) int {
 		return max
 	}
 
-	envVar := fmt.Sprintf("M3U_MAX_CONCURRENCY_%s", m3uIndex)
-	maxStr := os.Getenv(envVar)
-	max, err := strconv.Atoi(maxStr)
-	if err != nil || max < 1 {
-		max = 1
-	}
+	max := utils.GetSourceMaxConcurrency(m3uIndex)
 
 	cm.maxCache.Store(m3uIndex, max)
 	return max
@@ -105,4 +98,3 @@ func (cm *ConcurrencyManager) GetCount(m3uIndex string) int {
 	}
 	return 0
 }
-

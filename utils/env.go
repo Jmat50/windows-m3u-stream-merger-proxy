@@ -9,6 +9,12 @@ import (
 	"sync"
 )
 
+type SourceConfig struct {
+	Index          string
+	URL            string
+	MaxConcurrency int
+}
+
 func GetEnv(env string) string {
 	switch env {
 	case "USER_AGENT":
@@ -29,24 +35,168 @@ func GetEnv(env string) string {
 }
 
 var (
-	m3uIndexes     []string
-	m3uIndexesOnce = new(sync.Once)
+	dynamicSources   []SourceConfig
+	dynamicSourcesMu sync.RWMutex
 )
 
+func GetSourceConfigs() []SourceConfig {
+	staticSources := loadStaticSources()
+
+	merged := make(map[string]SourceConfig, len(staticSources))
+	for _, source := range staticSources {
+		merged[source.Index] = source
+	}
+
+	dynamicSourcesMu.RLock()
+	for _, source := range dynamicSources {
+		merged[source.Index] = source
+	}
+	dynamicSourcesMu.RUnlock()
+
+	keys := make([]string, 0, len(merged))
+	for index := range merged {
+		keys = append(keys, index)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		return lessIndex(keys[i], keys[j])
+	})
+
+	sources := make([]SourceConfig, 0, len(keys))
+	for _, index := range keys {
+		sources = append(sources, merged[index])
+	}
+
+	return sources
+}
+
 func GetM3UIndexes() []string {
-	m3uIndexesOnce.Do(func() {
-		for _, env := range os.Environ() {
-			pair := strings.SplitN(env, "=", 2)
-			if strings.HasPrefix(pair[0], "M3U_URL_") {
-				indexString := strings.TrimPrefix(pair[0], "M3U_URL_")
-				m3uIndexes = append(m3uIndexes, indexString)
+	sources := GetSourceConfigs()
+	indexes := make([]string, 0, len(sources))
+	for _, source := range sources {
+		indexes = append(indexes, source.Index)
+	}
+	return indexes
+}
+
+func GetSourceConfig(index string) (SourceConfig, bool) {
+	dynamicSourcesMu.RLock()
+	for _, source := range dynamicSources {
+		if source.Index == index {
+			dynamicSourcesMu.RUnlock()
+			return source, true
+		}
+	}
+	dynamicSourcesMu.RUnlock()
+
+	for _, source := range loadStaticSources() {
+		if source.Index == index {
+			return source, true
+		}
+	}
+
+	return SourceConfig{}, false
+}
+
+func GetSourceURL(index string) (string, bool) {
+	source, ok := GetSourceConfig(index)
+	if !ok {
+		return "", false
+	}
+	return source.URL, true
+}
+
+func GetSourceMaxConcurrency(index string) int {
+	source, ok := GetSourceConfig(index)
+	if ok && source.MaxConcurrency > 0 {
+		return source.MaxConcurrency
+	}
+
+	value := strings.TrimSpace(os.Getenv(fmt.Sprintf("M3U_MAX_CONCURRENCY_%s", index)))
+	if value == "" {
+		return 1
+	}
+
+	maxConcurrency, err := strconv.Atoi(value)
+	if err != nil || maxConcurrency < 1 {
+		return 1
+	}
+
+	return maxConcurrency
+}
+
+func SetDynamicSources(sources []SourceConfig) {
+	normalized := make([]SourceConfig, 0, len(sources))
+	seen := make(map[string]struct{}, len(sources))
+
+	for _, source := range sources {
+		index := strings.TrimSpace(source.Index)
+		url := strings.TrimSpace(source.URL)
+		if index == "" || url == "" {
+			continue
+		}
+
+		if _, ok := seen[index]; ok {
+			continue
+		}
+		seen[index] = struct{}{}
+
+		maxConcurrency := source.MaxConcurrency
+		if maxConcurrency < 1 {
+			maxConcurrency = 1
+		}
+
+		normalized = append(normalized, SourceConfig{
+			Index:          index,
+			URL:            url,
+			MaxConcurrency: maxConcurrency,
+		})
+	}
+
+	sort.Slice(normalized, func(i, j int) bool {
+		return lessIndex(normalized[i].Index, normalized[j].Index)
+	})
+
+	dynamicSourcesMu.Lock()
+	dynamicSources = normalized
+	dynamicSourcesMu.Unlock()
+}
+
+func loadStaticSources() []SourceConfig {
+	sources := make([]SourceConfig, 0, 8)
+	for _, env := range os.Environ() {
+		pair := strings.SplitN(env, "=", 2)
+		if !strings.HasPrefix(pair[0], "M3U_URL_") {
+			continue
+		}
+
+		indexString := strings.TrimPrefix(pair[0], "M3U_URL_")
+		url := ""
+		if len(pair) > 1 {
+			url = strings.TrimSpace(pair[1])
+		}
+		if indexString == "" || url == "" {
+			continue
+		}
+
+		maxConcurrency := 1
+		if value := strings.TrimSpace(os.Getenv(fmt.Sprintf("M3U_MAX_CONCURRENCY_%s", indexString))); value != "" {
+			if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+				maxConcurrency = parsed
 			}
 		}
-		sort.Slice(m3uIndexes, func(i, j int) bool {
-			return lessIndex(m3uIndexes[i], m3uIndexes[j])
+
+		sources = append(sources, SourceConfig{
+			Index:          indexString,
+			URL:            url,
+			MaxConcurrency: maxConcurrency,
 		})
+	}
+
+	sort.Slice(sources, func(i, j int) bool {
+		return lessIndex(sources[i].Index, sources[j].Index)
 	})
-	return m3uIndexes
+
+	return sources
 }
 
 var (
@@ -123,8 +273,9 @@ func lessIndex(a, b string) bool {
 }
 
 func ResetCaches() {
-	m3uIndexesOnce = new(sync.Once)
-	m3uIndexes = nil
+	dynamicSourcesMu.Lock()
+	dynamicSources = nil
+	dynamicSourcesMu.Unlock()
 
 	filterMutex.Lock()
 	filters = make(map[string][]string)

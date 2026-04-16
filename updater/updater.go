@@ -2,13 +2,14 @@ package updater
 
 import (
 	"context"
-	"windows-m3u-stream-merger-proxy/config"
-	"windows-m3u-stream-merger-proxy/handlers"
-	"windows-m3u-stream-merger-proxy/logger"
-	"windows-m3u-stream-merger-proxy/sourceproc"
 	"os"
 	"strings"
 	"sync"
+	"windows-m3u-stream-merger-proxy/config"
+	"windows-m3u-stream-merger-proxy/discovery"
+	"windows-m3u-stream-merger-proxy/handlers"
+	"windows-m3u-stream-merger-proxy/logger"
+	"windows-m3u-stream-merger-proxy/sourceproc"
 
 	"github.com/robfig/cron/v3"
 )
@@ -19,6 +20,7 @@ type Updater struct {
 	Cron       *cron.Cron
 	logger     logger.Logger
 	m3uHandler *handlers.M3UHTTPHandler
+	discovery  *discovery.Manager
 }
 
 func Initialize(ctx context.Context, logger logger.Logger, m3uHandler *handlers.M3UHTTPHandler) (*Updater, error) {
@@ -27,6 +29,14 @@ func Initialize(ctx context.Context, logger logger.Logger, m3uHandler *handlers.
 		logger:     logger,
 		m3uHandler: m3uHandler,
 	}
+
+	discoveryManager, err := discovery.Initialize(ctx, logger, func() {
+		updateInstance.UpdateSources(ctx)
+	})
+	if err != nil {
+		return nil, err
+	}
+	updateInstance.discovery = discoveryManager
 
 	clearOnBoot := os.Getenv("CLEAR_ON_BOOT")
 	if len(strings.TrimSpace(clearOnBoot)) == 0 {
@@ -53,7 +63,7 @@ func Initialize(ctx context.Context, logger logger.Logger, m3uHandler *handlers.
 	}
 
 	c := cron.New()
-	_, err := c.AddFunc(cronSched, func() {
+	_, err = c.AddFunc(cronSched, func() {
 		go updateInstance.UpdateSources(ctx)
 	})
 	if err != nil {
@@ -100,4 +110,3 @@ func (instance *Updater) UpdateSources(ctx context.Context) {
 		}
 	}
 }
-
