@@ -6,15 +6,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"sync"
+	"sync/atomic"
+	"time"
 	"windows-m3u-stream-merger-proxy/logger"
 	"windows-m3u-stream-merger-proxy/proxy"
 	"windows-m3u-stream-merger-proxy/proxy/loadbalancer"
 	"windows-m3u-stream-merger-proxy/proxy/stream/config"
 	"windows-m3u-stream-merger-proxy/store"
-	"net/http"
-	"sync"
-	"sync/atomic"
-	"time"
 
 	"github.com/valyala/bytebufferpool"
 )
@@ -344,8 +344,8 @@ func (c *StreamCoordinator) Write(chunk *ChunkData) bool {
 }
 
 // ReadChunks retrieves chunks from the ring for a client, given a starting position.
-func (c *StreamCoordinator) ReadChunks(fromPosition *ring.Ring) (
-	[]*ChunkData, *ChunkData, *ring.Ring,
+func (c *StreamCoordinator) ReadChunks(ctx context.Context, fromPosition *ring.Ring) (
+	[]*ChunkData, *ChunkData, *ring.Ring, error,
 ) {
 	c.Mu.RLock()
 	if fromPosition == nil {
@@ -366,7 +366,11 @@ func (c *StreamCoordinator) ReadChunks(fromPosition *ring.Ring) (
 	for fromPosition == c.Buffer && atomic.LoadInt32(&c.state) == stateActive {
 		c.Mu.RUnlock()
 		ch := c.subscribe()
-		<-ch
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return nil, nil, fromPosition, ctx.Err()
+		}
 		c.Mu.RLock()
 	}
 
@@ -404,16 +408,16 @@ func (c *StreamCoordinator) ReadChunks(fromPosition *ring.Ring) (
 	c.Mu.RUnlock()
 
 	if errorFound && errorChunk != nil {
-		return chunks, errorChunk, current
+		return chunks, errorChunk, current, nil
 	}
 
 	if lastErr := c.LastError.Load(); lastErr != nil {
 		if errChunk, ok := lastErr.(*ChunkData); ok && errChunk != nil {
-			return chunks, errChunk, current
+			return chunks, errChunk, current, nil
 		}
 	}
 
-	return chunks, nil, current
+	return chunks, nil, current, nil
 }
 
 // ClearBuffer resets every chunk in the ring.
@@ -594,4 +598,3 @@ func (c *StreamCoordinator) readAndWriteStream(
 	}
 	return nil
 }
-

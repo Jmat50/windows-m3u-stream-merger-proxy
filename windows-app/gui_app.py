@@ -51,6 +51,7 @@ DEFAULT_SETTINGS = {
     "sync_cron": "0 0 * * *",
     "sync_on_boot": True,
     "clear_on_boot": False,
+    "shared_buffer": True,
     "credentials": "",
     "max_retries": "5",
     "retry_wait": "0",
@@ -281,6 +282,7 @@ class DesktopApp(tk.Tk):
         self.start_on_boot_var = tk.BooleanVar()
         self.sync_on_boot_var = tk.BooleanVar()
         self.clear_on_boot_var = tk.BooleanVar()
+        self.shared_buffer_var = tk.BooleanVar()
         self.status_var = tk.StringVar(value="STOPPED")
         self.status_detail_var = tk.StringVar(value="Server process is not running.")
         self.playlist_url_var = tk.StringVar(value="Playlist URL: not available")
@@ -297,7 +299,7 @@ class DesktopApp(tk.Tk):
         self.channel_source_rules: list[dict[str, object]] = []
         self.channel_merge_rules: list[dict[str, str]] = []
         self.web_discovery_jobs: list[dict[str, object]] = []
-        self.sources_items: list[dict[str, str]] = []
+        self.sources_items: list[dict[str, object]] = []
         self.source_action_icons: dict[str, tk.PhotoImage] = {}
         self.channel_source_reorder_callback: Callable[[], None] | None = None
 
@@ -457,6 +459,9 @@ class DesktopApp(tk.Tk):
         )
         ttk.Checkbutton(root, text="Start on Boot", variable=self.start_on_boot_var).grid(
             row=4, column=2, sticky="w", pady=(8, 0)
+        )
+        ttk.Checkbutton(root, text="Shared Buffer", variable=self.shared_buffer_var).grid(
+            row=4, column=3, sticky="w", pady=(8, 0)
         )
 
         ttk.Label(root, text="M3U Sources (order defines source index)").grid(
@@ -714,6 +719,7 @@ class DesktopApp(tk.Tk):
         self.start_on_boot_var.set(bool(settings.get("start_on_boot", DEFAULT_SETTINGS["start_on_boot"])))
         self.sync_on_boot_var.set(bool(settings.get("sync_on_boot", DEFAULT_SETTINGS["sync_on_boot"])))
         self.clear_on_boot_var.set(bool(settings.get("clear_on_boot", DEFAULT_SETTINGS["clear_on_boot"])))
+        self.shared_buffer_var.set(bool(settings.get("shared_buffer", DEFAULT_SETTINGS["shared_buffer"])))
 
         self.sources_items = self._normalize_sources(settings.get("sources", []))
         self._refresh_sources_tree()
@@ -794,11 +800,11 @@ class DesktopApp(tk.Tk):
                 self._show_error("Start on Boot", f"Could not update Start on Boot setting:\n{exc}")
             self._append_log(f"[APP] Failed to update Start on Boot: {exc}")
 
-    def _normalize_sources(self, value: object) -> list[dict[str, str]]:
+    def _normalize_sources(self, value: object) -> list[dict[str, object]]:
         if not isinstance(value, list):
             return []
 
-        output: list[dict[str, str]] = []
+        output: list[dict[str, object]] = []
         for index, item in enumerate(value, start=1):
             if isinstance(item, dict):
                 url = str(item.get("url", "")).strip()
@@ -806,6 +812,7 @@ class DesktopApp(tk.Tk):
                     continue
                 name = str(item.get("name", "")).strip() or f"Source {index}"
                 concurrency = str(item.get("concurrency", "1")).strip() or "1"
+                contains_vod = bool(item.get("contains_vod", True))
                 if not concurrency.isdigit() or int(concurrency) < 1:
                     concurrency = "1"
                 output.append(
@@ -813,6 +820,7 @@ class DesktopApp(tk.Tk):
                         "name": name,
                         "url": url,
                         "concurrency": concurrency,
+                        "contains_vod": contains_vod,
                     }
                 )
                 continue
@@ -820,7 +828,7 @@ class DesktopApp(tk.Tk):
             if isinstance(item, str):
                 url = item.strip()
                 if url:
-                    output.append({"name": f"Source {index}", "url": url, "concurrency": "1"})
+                    output.append({"name": f"Source {index}", "url": url, "concurrency": "1", "contains_vod": True})
 
         return output
 
@@ -942,6 +950,7 @@ class DesktopApp(tk.Tk):
         name_var = tk.StringVar(value=f"Source {len(self.sources_items) + 1}")
         url_var = tk.StringVar()
         concurrency_var = tk.StringVar(value="1")
+        contains_vod_var = tk.BooleanVar(value=True)
 
         ttk.Label(frame, text="Source Name").grid(row=0, column=0, sticky="w")
         name_entry = ttk.Entry(frame, textvariable=name_var)
@@ -955,19 +964,22 @@ class DesktopApp(tk.Tk):
         concurrency_entry = ttk.Entry(frame, textvariable=concurrency_var, width=8)
         concurrency_entry.grid(row=2, column=1, sticky="w", padx=(8, 0), pady=(10, 0))
 
+        ttk.Checkbutton(frame, text="Contains VOD", variable=contains_vod_var).grid(row=3, column=0, columnspan=2, sticky="w", pady=(10, 0))
+
         ttk.Label(
             frame,
             text="Source index is assigned automatically by list order.\nUse up/down icons to reorder after adding.",
             foreground="#4f4f4f",
-        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(10, 0))
 
         footer = ttk.Frame(frame)
-        footer.grid(row=4, column=0, columnspan=2, sticky="e", pady=(14, 0))
+        footer.grid(row=5, column=0, columnspan=2, sticky="e", pady=(14, 0))
 
         def add_source_from_dialog() -> None:
             name = name_var.get().strip() or f"Source {len(self.sources_items) + 1}"
             url = url_var.get().strip()
             concurrency = concurrency_var.get().strip() or "1"
+            contains_vod = contains_vod_var.get()
 
             if not url:
                 self._show_error("Invalid Source", "Source URL is required.")
@@ -976,7 +988,7 @@ class DesktopApp(tk.Tk):
                 self._show_error("Invalid Source", "Max concurrency must be a positive integer.")
                 return
 
-            self.sources_items.append({"name": name, "url": url, "concurrency": concurrency})
+            self.sources_items.append({"name": name, "url": url, "concurrency": concurrency, "contains_vod": contains_vod})
             new_index = len(self.sources_items) - 1
             self._refresh_sources_tree(select_index=new_index)
             self._set_last_event(f"Added source '{name}'.")
@@ -2604,7 +2616,7 @@ class DesktopApp(tk.Tk):
         if not stream_timeout.isdigit() or int(stream_timeout) <= 0:
             raise ValueError("Stream timeout must be greater than 0.")
 
-        sources: list[dict[str, str]] = []
+        sources: list[dict[str, object]] = []
         for index, source in enumerate(self.sources_items, start=1):
             url = str(source.get("url", "")).strip()
             if not url:
@@ -2612,6 +2624,7 @@ class DesktopApp(tk.Tk):
 
             name = str(source.get("name", "")).strip() or f"Source {index}"
             concurrency = str(source.get("concurrency", "1")).strip() or "1"
+            contains_vod = bool(source.get("contains_vod", True))
             if not concurrency.isdigit() or int(concurrency) < 1:
                 raise ValueError(f"Invalid concurrency for source '{name}'.")
 
@@ -2620,6 +2633,7 @@ class DesktopApp(tk.Tk):
                     "name": name,
                     "url": url,
                     "concurrency": concurrency,
+                    "contains_vod": contains_vod,
                 }
             )
 
@@ -2631,6 +2645,7 @@ class DesktopApp(tk.Tk):
             "start_on_boot": bool(self.start_on_boot_var.get()),
             "sync_on_boot": bool(self.sync_on_boot_var.get()),
             "clear_on_boot": bool(self.clear_on_boot_var.get()),
+            "shared_buffer": bool(self.shared_buffer_var.get()),
             "credentials": self.credentials_var.get().strip(),
             "max_retries": max_retries,
             "retry_wait": retry_wait,
@@ -2941,6 +2956,7 @@ class DesktopApp(tk.Tk):
     def _server_candidates(self) -> list[Path]:
         exe_dir = Path(sys.executable).resolve().parent
         meipass = getattr(sys, "_MEIPASS", None)
+        script_dir = Path(__file__).resolve().parent
 
         search_roots: list[Path] = []
         if meipass:
@@ -2950,7 +2966,9 @@ class DesktopApp(tk.Tk):
                 _resource_root(),
                 exe_dir,
                 exe_dir / "_internal",
-                Path(__file__).resolve().parent,
+                script_dir,
+                script_dir / "build",
+                script_dir / "build" / "server",
                 Path.cwd(),
             ]
         )
@@ -3198,6 +3216,7 @@ class DesktopApp(tk.Tk):
             if (
                 key.startswith("M3U_URL_")
                 or key.startswith("M3U_MAX_CONCURRENCY_")
+                or key.startswith("M3U_CONTAINS_VOD_")
                 or key.startswith("INCLUDE_TITLE_")
                 or key.startswith("EXCLUDE_TITLE_")
                 or key.startswith("CHANNEL_SOURCES_")
@@ -3216,6 +3235,7 @@ class DesktopApp(tk.Tk):
         env["MAX_RETRIES"] = settings["max_retries"]
         env["RETRY_WAIT"] = settings["retry_wait"]
         env["STREAM_TIMEOUT"] = settings["stream_timeout"]
+        env["SHARED_BUFFER"] = _to_bool_env(settings.get("shared_buffer", DEFAULT_SETTINGS["shared_buffer"]))
         env["DATA_PATH"] = str(DATA_DIR)
         env["TEMP_PATH"] = str(TEMP_DIR)
 
@@ -3230,6 +3250,7 @@ class DesktopApp(tk.Tk):
 
             env[f"M3U_URL_{index}"] = source_url
             env[f"M3U_MAX_CONCURRENCY_{index}"] = concurrency
+            env[f"M3U_CONTAINS_VOD_{index}"] = _to_bool_env(bool(source.get("contains_vod", True)))
 
         for index, pattern in enumerate(settings["include_title_filters"], start=1):
             value = str(pattern).strip()
@@ -3546,13 +3567,14 @@ class DesktopApp(tk.Tk):
             pass
 
     def _settings_snapshot_for_error_log(self) -> dict[str, object]:
-        safe_sources: list[dict[str, str]] = []
+        safe_sources: list[dict[str, object]] = []
         for source in self.sources_items:
             safe_sources.append(
                 {
                     "name": str(source.get("name", "")).strip(),
                     "url": str(source.get("url", "")).strip(),
                     "concurrency": str(source.get("concurrency", "")).strip(),
+                    "contains_vod": bool(source.get("contains_vod", True)),
                 }
             )
 
@@ -3563,6 +3585,7 @@ class DesktopApp(tk.Tk):
             "sync_cron": self.sync_cron_var.get().strip(),
             "sync_on_boot": bool(self.sync_on_boot_var.get()),
             "clear_on_boot": bool(self.clear_on_boot_var.get()),
+            "shared_buffer": bool(self.shared_buffer_var.get()),
             "start_on_boot": bool(self.start_on_boot_var.get()),
             "sources": safe_sources,
             "include_title_filters": list(self.include_title_filters),

@@ -6,6 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
 	"windows-m3u-stream-merger-proxy/logger"
 	"windows-m3u-stream-merger-proxy/proxy"
 	"windows-m3u-stream-merger-proxy/proxy/client"
@@ -13,12 +21,7 @@ import (
 	"windows-m3u-stream-merger-proxy/proxy/stream/buffer"
 	"windows-m3u-stream-merger-proxy/proxy/stream/config"
 	"windows-m3u-stream-merger-proxy/store"
-	"net/http"
-	"net/http/httptest"
-	"strings"
-	"sync"
-	"testing"
-	"time"
+	"windows-m3u-stream-merger-proxy/utils"
 )
 
 type mockResponseWriter struct {
@@ -52,6 +55,60 @@ func (m *mockResponseWriter) WriteHeader(statusCode int) {
 
 func (m *mockResponseWriter) Flush() {
 	// Mock implementation
+}
+
+type eofAfterDataReader struct {
+	data []byte
+	read bool
+}
+
+func (r *eofAfterDataReader) Read(p []byte) (int, error) {
+	if r.read {
+		return 0, io.EOF
+	}
+
+	r.read = true
+	n := copy(p, r.data)
+	return n, io.EOF
+}
+
+type blockingReadCloser struct {
+	closed  chan struct{}
+	first   []byte
+	started chan struct{}
+	read    bool
+	mu      sync.Mutex
+}
+
+func newBlockingReadCloser(first []byte) *blockingReadCloser {
+	return &blockingReadCloser{
+		closed:  make(chan struct{}),
+		first:   append([]byte(nil), first...),
+		started: make(chan struct{}),
+	}
+}
+
+func (r *blockingReadCloser) Read(p []byte) (int, error) {
+	r.mu.Lock()
+	if !r.read {
+		r.read = true
+		r.mu.Unlock()
+		close(r.started)
+		n := copy(p, r.first)
+		return n, nil
+	}
+	r.mu.Unlock()
+	<-r.closed
+	return 0, io.EOF
+}
+
+func (r *blockingReadCloser) Close() error {
+	select {
+	case <-r.closed:
+	default:
+		close(r.closed)
+	}
+	return nil
 }
 
 type mockHLSServer struct {
@@ -228,6 +285,144 @@ func TestM3U8StreamHandler_HandleStream(t *testing.T) {
 	}
 }
 
+func TestM3U8StreamHandler_HandleStream_StripsClientRangeForInternalFetches(t *testing.T) {
+	var playlistRangeSeen atomic.Bool
+	var segmentRangeSeen atomic.Bool
+
+	segmentData := []byte("TESTSEGMNT1!")
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Range") != "" {
+			switch r.URL.Path {
+			case "/playlist.m3u8":
+				playlistRangeSeen.Store(true)
+			case "/segment1.ts":
+				segmentRangeSeen.Store(true)
+			}
+		}
+
+		switch r.URL.Path {
+		case "/playlist.m3u8":
+			w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+			if r.Header.Get("Range") != "" {
+				w.WriteHeader(http.StatusPartialContent)
+			}
+			_, _ = fmt.Fprintf(w, `#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-TARGETDURATION:2
+#EXTINF:2.0,
+%s/segment1.ts
+#EXT-X-ENDLIST`, server.URL)
+		case "/segment1.ts":
+			w.Header().Set("Content-Type", "video/MP2T")
+			if r.Header.Get("Range") != "" {
+				w.WriteHeader(http.StatusPartialContent)
+			}
+			_, _ = w.Write(segmentData)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := config.NewDefaultStreamConfig()
+	cfg.TimeoutSeconds = 5
+	cm := store.NewConcurrencyManager()
+	coordinator := buffer.NewStreamCoordinator("test_id", cfg, cm, logger.Default)
+	handler := NewStreamHandler(cfg, coordinator, logger.Default)
+
+	initialReq, _ := http.NewRequest(http.MethodGet, server.URL+"/playlist.m3u8", nil)
+	initialResp, err := http.DefaultClient.Do(initialReq)
+	if err != nil {
+		t.Fatalf("Failed to get initial playlist response: %v", err)
+	}
+
+	clientReq := httptest.NewRequest(http.MethodGet, "http://proxy.test/p/channel.m3u8", nil)
+	clientReq.Header.Set("Range", "bytes=0-")
+	clientReq.Header.Set("If-Range", `"etag"`)
+
+	writer := &mockResponseWriter{}
+	streamClient := client.NewStreamClient(writer, clientReq)
+
+	lbRes := &loadbalancer.LoadBalancerResult{
+		Response: initialResp,
+		Index:    "1",
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	result := handler.HandleStream(ctx, lbRes, streamClient)
+
+	if result.Status != proxy.StatusEOF {
+		t.Fatalf("HandleStream() status = %v, want %v", result.Status, proxy.StatusEOF)
+	}
+	if playlistRangeSeen.Load() {
+		t.Fatal("playlist polling unexpectedly forwarded client Range header")
+	}
+	if segmentRangeSeen.Load() {
+		t.Fatal("segment fetching unexpectedly forwarded client Range header")
+	}
+}
+
+func TestM3U8StreamHandler_HandleStream_Accepts206ForPlaylistAndSegments(t *testing.T) {
+	segmentData := []byte("TESTSEGMNT1!")
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/playlist.m3u8":
+			w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = fmt.Fprintf(w, `#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-TARGETDURATION:2
+#EXTINF:2.0,
+%s/segment1.ts
+#EXT-X-ENDLIST`, server.URL)
+		case "/segment1.ts":
+			w.Header().Set("Content-Type", "video/MP2T")
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write(segmentData)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := config.NewDefaultStreamConfig()
+	cfg.TimeoutSeconds = 5
+	cm := store.NewConcurrencyManager()
+	coordinator := buffer.NewStreamCoordinator("test_id", cfg, cm, logger.Default)
+	handler := NewStreamHandler(cfg, coordinator, logger.Default)
+
+	initialReq, _ := http.NewRequest(http.MethodGet, server.URL+"/playlist.m3u8", nil)
+	initialResp, err := http.DefaultClient.Do(initialReq)
+	if err != nil {
+		t.Fatalf("Failed to get initial playlist response: %v", err)
+	}
+
+	clientReq := httptest.NewRequest(http.MethodGet, "http://proxy.test/p/channel.m3u8", nil)
+	writer := &mockResponseWriter{}
+	streamClient := client.NewStreamClient(writer, clientReq)
+
+	lbRes := &loadbalancer.LoadBalancerResult{
+		Response: initialResp,
+		Index:    "1",
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	result := handler.HandleStream(ctx, lbRes, streamClient)
+
+	if result.Status != proxy.StatusEOF {
+		t.Fatalf("HandleStream() status = %v, want %v", result.Status, proxy.StatusEOF)
+	}
+	if !bytes.Equal(writer.written, segmentData) {
+		t.Fatalf("HandleStream() wrote %q, want %q", writer.written, segmentData)
+	}
+}
+
 // Test StreamHandler
 func TestStreamHandler_HandleStream(t *testing.T) {
 	tests := []struct {
@@ -317,6 +512,7 @@ func TestStreamInstance_ProxyStream(t *testing.T) {
 		method         string
 		contentType    string
 		setupMock      func(*mockHLSServer)
+		forceStatus    int
 		expectedStatus int
 	}{
 		{
@@ -344,6 +540,26 @@ func TestStreamInstance_ProxyStream(t *testing.T) {
 			contentType: "video/MP2T",
 			setupMock: func(m *mockHLSServer) {
 				m.segments["/media"] = []byte("media content!")
+			},
+			expectedStatus: proxy.StatusEOF,
+		},
+		{
+			name:        "handle m3u8 stream with 206 status",
+			method:      http.MethodGet,
+			contentType: "application/vnd.apple.mpegurl",
+			forceStatus: http.StatusPartialContent,
+			setupMock: func(m *mockHLSServer) {
+				m.mediaPlaylist = fmt.Sprintf(`#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-TARGETDURATION:10
+#EXTINF:10.0,
+%s/segment1.ts
+#EXTINF:10.0,
+%s/segment2.ts
+#EXT-X-ENDLIST`, m.server.URL, m.server.URL)
+
+				m.segments["/segment1.ts"] = segment1Data
+				m.segments["/segment2.ts"] = segment2Data
 			},
 			expectedStatus: proxy.StatusEOF,
 		},
@@ -381,6 +597,14 @@ func TestStreamInstance_ProxyStream(t *testing.T) {
 
 			if tt.contentType == "video/MP2T" {
 				resp.Body = io.NopCloser(bytes.NewReader(mockServer.segments["/media"]))
+			} else if tt.contentType == "application/vnd.apple.mpegurl" {
+				resp, err = http.Get(mockServer.server.URL + path)
+				if err != nil {
+					t.Fatalf("Failed to get mock response: %v", err)
+				}
+				if tt.forceStatus != 0 {
+					resp.StatusCode = tt.forceStatus
+				}
 			} else {
 				resp, err = http.Get(mockServer.server.URL + path)
 				if err != nil {
@@ -410,3 +634,237 @@ func TestStreamInstance_ProxyStream(t *testing.T) {
 	}
 }
 
+func TestStreamHandler_HandleDirectStream_WritesFinalChunkAndCompletes(t *testing.T) {
+	cfg := config.NewDefaultStreamConfig()
+	handler := NewStreamHandler(cfg, nil, logger.Default)
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/media.ts", nil)
+	writer := &mockResponseWriter{}
+	streamClient := client.NewStreamClient(writer, req)
+
+	payload := []byte("final direct chunk")
+	resp := &http.Response{
+		StatusCode: http.StatusPartialContent,
+		Header:     make(http.Header),
+		Body: io.NopCloser(&eofAfterDataReader{
+			data: payload,
+		}),
+	}
+
+	lbRes := &loadbalancer.LoadBalancerResult{
+		Response: resp,
+		URL:      "http://origin.example/media.ts",
+		Index:    "1",
+	}
+
+	result := handler.HandleDirectStream(context.Background(), lbRes, streamClient)
+
+	if result.Status != proxy.StatusCompleted {
+		t.Fatalf("HandleDirectStream() status = %v, want %v", result.Status, proxy.StatusCompleted)
+	}
+	if result.Error != nil {
+		t.Fatalf("HandleDirectStream() error = %v, want nil", result.Error)
+	}
+	if result.BytesWritten != int64(len(payload)) {
+		t.Fatalf("HandleDirectStream() bytesWritten = %v, want %v", result.BytesWritten, len(payload))
+	}
+	if !bytes.Equal(writer.written, payload) {
+		t.Fatalf("HandleDirectStream() wrote %q, want %q", writer.written, payload)
+	}
+}
+
+func TestStreamInstance_ProxyStream_DoesNotTreat206LiveMediaAsVODWhenSourceDisablesVOD(t *testing.T) {
+	utils.ResetCaches()
+	defer utils.ResetCaches()
+
+	_ = os.Unsetenv("M3U_URL_1")
+	_ = os.Unsetenv("M3U_CONTAINS_VOD_1")
+	defer func() {
+		_ = os.Unsetenv("M3U_URL_1")
+		_ = os.Unsetenv("M3U_CONTAINS_VOD_1")
+	}()
+
+	_ = os.Setenv("M3U_URL_1", "http://example.com/live")
+	_ = os.Setenv("M3U_CONTAINS_VOD_1", "false")
+
+	cfg := config.NewDefaultStreamConfig()
+	cm := store.NewConcurrencyManager()
+	coordinator := buffer.NewStreamCoordinator("test_id", cfg, cm, logger.Default)
+
+	instance, err := NewStreamInstance(cm, cfg, WithLogger(logger.Default))
+	if err != nil {
+		t.Fatalf("Failed to create StreamInstance: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/live", nil)
+	resp := &http.Response{
+		StatusCode: http.StatusPartialContent,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(bytes.NewReader([]byte("live transport stream bytes"))),
+		Request: &http.Request{
+			URL: req.URL,
+		},
+	}
+	resp.Header.Set("Content-Type", "video/MP2T")
+
+	writer := &mockResponseWriter{}
+	streamClient := client.NewStreamClient(writer, req)
+	statusChan := make(chan int, 1)
+
+	lbRes := &loadbalancer.LoadBalancerResult{
+		Response: resp,
+		URL:      "http://origin.example/live",
+		Index:    "1",
+	}
+
+	instance.ProxyStream(context.Background(), coordinator, lbRes, streamClient, statusChan)
+
+	select {
+	case status := <-statusChan:
+		if status != proxy.StatusEOF {
+			t.Fatalf("ProxyStream() status = %v, want %v for non-VOD live media", status, proxy.StatusEOF)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ProxyStream() timed out waiting for status")
+	}
+}
+
+func TestStreamInstance_ProxyStream_UsesDirectPathForLiveMediaWhenSharedBufferDisabled(t *testing.T) {
+	utils.ResetCaches()
+	defer utils.ResetCaches()
+
+	_ = os.Unsetenv("M3U_URL_1")
+	_ = os.Unsetenv("M3U_CONTAINS_VOD_1")
+	_ = os.Unsetenv("SHARED_BUFFER")
+	defer func() {
+		_ = os.Unsetenv("M3U_URL_1")
+		_ = os.Unsetenv("M3U_CONTAINS_VOD_1")
+		_ = os.Unsetenv("SHARED_BUFFER")
+	}()
+
+	_ = os.Setenv("M3U_URL_1", "http://example.com/live")
+	_ = os.Setenv("M3U_CONTAINS_VOD_1", "false")
+	_ = os.Setenv("SHARED_BUFFER", "false")
+
+	cfg := config.NewDefaultStreamConfig()
+	cm := store.NewConcurrencyManager()
+	coordinator := buffer.NewStreamCoordinator("test_id", cfg, cm, logger.Default)
+
+	instance, err := NewStreamInstance(cm, cfg, WithLogger(logger.Default))
+	if err != nil {
+		t.Fatalf("Failed to create StreamInstance: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/live", nil)
+	payload := []byte("live direct stream bytes")
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body: io.NopCloser(&eofAfterDataReader{
+			data: payload,
+		}),
+		Request: &http.Request{
+			URL: req.URL,
+		},
+	}
+	resp.Header.Set("Content-Type", "video/MP2T")
+
+	writer := &mockResponseWriter{}
+	streamClient := client.NewStreamClient(writer, req)
+	statusChan := make(chan int, 1)
+
+	lbRes := &loadbalancer.LoadBalancerResult{
+		Response: resp,
+		URL:      "http://origin.example/live",
+		Index:    "1",
+	}
+
+	instance.ProxyStream(context.Background(), coordinator, lbRes, streamClient, statusChan)
+
+	select {
+	case status := <-statusChan:
+		if status != proxy.StatusCompleted {
+			t.Fatalf("ProxyStream() status = %v, want %v for no-buffer live media passthrough", status, proxy.StatusCompleted)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ProxyStream() timed out waiting for status")
+	}
+
+	if got := cm.GetCount("1"); got != 0 {
+		t.Fatalf("expected concurrency count to return to 0 after direct passthrough, got %d", got)
+	}
+	if !bytes.Equal(writer.written, payload) {
+		t.Fatalf("ProxyStream() wrote %q, want %q", writer.written, payload)
+	}
+}
+
+func TestStreamHandler_HandleStream_CancelReleasesConcurrencyBeforeFirstChunk(t *testing.T) {
+	cfg := config.NewDefaultStreamConfig()
+	cfg.TimeoutSeconds = 30
+
+	cm := store.NewConcurrencyManager()
+	coordinator := buffer.NewStreamCoordinator("test_id", cfg, cm, logger.Default)
+	handler := NewStreamHandler(cfg, coordinator, logger.Default)
+
+	body := newBlockingReadCloser([]byte("not an m3u8"))
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/live", nil)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       body,
+		Request: &http.Request{
+			URL: req.URL,
+		},
+	}
+	resp.Header.Set("Content-Type", "video/MP2T")
+
+	lbRes := &loadbalancer.LoadBalancerResult{
+		Response: resp,
+		URL:      "http://origin.example/live",
+		Index:    "1",
+	}
+
+	writer := &mockResponseWriter{}
+	streamClient := client.NewStreamClient(writer, req)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	resultCh := make(chan StreamResult, 1)
+	go func() {
+		resultCh <- handler.HandleStream(ctx, lbRes, streamClient)
+	}()
+
+	select {
+	case <-body.started:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for upstream read to start")
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for cm.GetCount("1") != 1 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := cm.GetCount("1"); got != 1 {
+		t.Fatalf("expected concurrency count to reach 1 before cancel, got %d", got)
+	}
+
+	cancel()
+
+	select {
+	case result := <-resultCh:
+		if result.Status != proxy.StatusClientClosed {
+			t.Fatalf("HandleStream() status = %v, want %v", result.Status, proxy.StatusClientClosed)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("HandleStream() did not return promptly after context cancel")
+	}
+
+	deadline = time.Now().Add(time.Second)
+	for cm.GetCount("1") != 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := cm.GetCount("1"); got != 0 {
+		t.Fatalf("expected concurrency count to return to 0 after cancel, got %d", got)
+	}
+}

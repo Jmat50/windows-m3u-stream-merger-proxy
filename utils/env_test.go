@@ -67,3 +67,26 @@ func TestGetFilters_SortsByNumericSuffix(t *testing.T) {
 	}
 }
 
+func TestGetSourceConfigs_ReadsContainsVODOverride(t *testing.T) {
+	ResetCaches()
+	defer ResetCaches()
+
+	_ = os.Unsetenv("M3U_URL_1")
+	_ = os.Unsetenv("M3U_CONTAINS_VOD_1")
+	defer func() {
+		_ = os.Unsetenv("M3U_URL_1")
+		_ = os.Unsetenv("M3U_CONTAINS_VOD_1")
+	}()
+
+	_ = os.Setenv("M3U_URL_1", "http://example.com/playlist.m3u")
+	_ = os.Setenv("M3U_CONTAINS_VOD_1", "false")
+
+	sources := GetSourceConfigs()
+	if len(sources) != 1 {
+		t.Fatalf("GetSourceConfigs() length = %d, want 1 (%v)", len(sources), sources)
+	}
+
+	if sources[0].ContainsVOD {
+		t.Fatalf("GetSourceConfigs()[0].ContainsVOD = true, want false")
+	}
+}

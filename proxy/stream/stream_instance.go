@@ -3,6 +3,10 @@ package stream
 import (
 	"context"
 	"fmt"
+	"os"
+	"strconv"
+	"strings"
+
 	"windows-m3u-stream-merger-proxy/logger"
 	"windows-m3u-stream-merger-proxy/proxy"
 	"windows-m3u-stream-merger-proxy/proxy/client"
@@ -12,7 +16,6 @@ import (
 	"windows-m3u-stream-merger-proxy/proxy/stream/failovers"
 	"windows-m3u-stream-merger-proxy/store"
 	"windows-m3u-stream-merger-proxy/utils"
-	"strings"
 )
 
 type StreamInstance struct {
@@ -67,12 +70,48 @@ func (instance *StreamInstance) ProxyStream(
 	handler := NewStreamHandler(instance.config, coordinator, instance.logger)
 
 	var result StreamResult
-	if lbResult.Response.StatusCode == 206 || strings.HasSuffix(lbResult.URL, ".mp4") {
+
+	// Try to determine if this is an M3U8 playlist
+	isM3U8 := utils.IsProbablyM3U8(lbResult.Response)
+
+	// Check if this source contains VOD files
+	sourceConfig, _ := utils.GetSourceConfig(lbResult.Index)
+	allowsVOD := sourceConfig.ContainsVOD
+	sharedBufferEnabled := true
+	if value, ok := os.LookupEnv("SHARED_BUFFER"); ok {
+		if parsed, err := strconv.ParseBool(strings.TrimSpace(value)); err == nil {
+			sharedBufferEnabled = parsed
+		}
+	}
+
+	isDirectMedia := strings.HasSuffix(strings.ToLower(lbResult.URL), ".mp4") ||
+		strings.HasSuffix(strings.ToLower(lbResult.URL), ".ts") ||
+		utils.IsProbablyMedia(lbResult.Response)
+
+	if isM3U8 {
+		// This is an M3U8 playlist, handle as HLS stream
+		if _, ok := instance.Cm.Invalid.Load(lbResult.URL); !ok {
+			result = handler.HandleStream(ctx, lbResult, streamClient)
+		} else {
+			result = StreamResult{
+				Status: proxy.StatusIncompatible,
+			}
+		}
+	} else if isDirectMedia && (!sharedBufferEnabled || allowsVOD) {
+		// This is NOT an M3U8, but is a direct stream (VOD or live media stream)
 		coordinator.FinishWriterSetup()
-		handler.logger.Logf("VOD request detected from: %s", streamClient.Request.RemoteAddr)
-		handler.logger.Warn("VODs do not support shared buffer.")
-		result = handler.HandleDirectStream(ctx, lbResult, streamClient)
+		if !instance.Cm.UpdateConcurrency(lbResult.Index, true) {
+			result = StreamResult{
+				Error:  fmt.Errorf("concurrency limit reached"),
+				Status: proxy.StatusServerError,
+			}
+		} else {
+			defer instance.Cm.UpdateConcurrency(lbResult.Index, false)
+			handler.logger.Logf("Direct media request detected from: %s", streamClient.Request.RemoteAddr)
+			result = handler.HandleDirectStream(ctx, lbResult, streamClient)
+		}
 	} else {
+		// Default: try to handle as HLS stream in case content-type is missing
 		if _, ok := instance.Cm.Invalid.Load(lbResult.URL); !ok {
 			result = handler.HandleStream(ctx, lbResult, streamClient)
 		} else {
@@ -82,7 +121,10 @@ func (instance *StreamInstance) ProxyStream(
 		}
 	}
 	if result.Error != nil {
-		if result.Status != proxy.StatusIncompatible {
+		if result.Status != proxy.StatusIncompatible &&
+			result.Status != proxy.StatusClientClosed &&
+			result.Status != proxy.StatusEOF &&
+			result.Status != proxy.StatusCompleted {
 			instance.logger.Errorf("Stream handler status: %v", result.Error)
 		}
 	}
@@ -110,4 +152,3 @@ func (instance *StreamInstance) ProxyStream(
 
 	statusChan <- result.Status
 }
-

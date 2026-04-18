@@ -6,10 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"windows-m3u-stream-merger-proxy/proxy"
-	"windows-m3u-stream-merger-proxy/proxy/client"
-	"windows-m3u-stream-merger-proxy/proxy/loadbalancer"
-	"windows-m3u-stream-merger-proxy/utils"
 	"math"
 	"math/rand/v2"
 	"net/http"
@@ -17,6 +13,10 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"windows-m3u-stream-merger-proxy/proxy"
+	"windows-m3u-stream-merger-proxy/proxy/client"
+	"windows-m3u-stream-merger-proxy/proxy/loadbalancer"
+	"windows-m3u-stream-merger-proxy/utils"
 )
 
 const (
@@ -93,7 +93,7 @@ func (c *StreamCoordinator) StartHLSWriter(ctx context.Context, lbResult *loadba
 				return
 			}
 
-			resp, err := utils.CustomHttpRequest(streamC.Request, "GET", playlistURL)
+			resp, err := utils.CustomInternalHttpRequest(streamC.Request, "GET", playlistURL)
 			if err != nil {
 				c.logger.Warnf("Failed to fetch playlist: %v", err)
 				lastErr = err
@@ -105,9 +105,9 @@ func (c *StreamCoordinator) StartHLSWriter(ctx context.Context, lbResult *loadba
 				continue
 			}
 
-			if resp.StatusCode != http.StatusOK {
+			if !isAcceptablePlaylistStatus(resp.StatusCode) {
 				resp.Body.Close()
-				c.logger.Warnf("Non-200 status for playlist: %d", resp.StatusCode)
+				c.logger.Warnf("Unexpected status for playlist: %d", resp.StatusCode)
 				lastErr = fmt.Errorf("playlist returned status %d", resp.StatusCode)
 				continue
 			}
@@ -240,7 +240,7 @@ func (c *StreamCoordinator) processSegments(ctx context.Context, segments []stri
 }
 
 func (c *StreamCoordinator) streamSegment(ctx context.Context, segmentURL string, streamC *client.StreamClient) error {
-	resp, err := utils.CustomHttpRequest(streamC.Request, "GET", segmentURL)
+	resp, err := utils.CustomInternalHttpRequest(streamC.Request, "GET", segmentURL)
 	if err != nil {
 		return fmt.Errorf("Error fetching segment stream: %v", err)
 	}
@@ -250,8 +250,8 @@ func (c *StreamCoordinator) streamSegment(ctx context.Context, segmentURL string
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("Non-200 status code received: %d for %s", resp.StatusCode, segmentURL)
+	if !isAcceptablePlaylistStatus(resp.StatusCode) {
+		return fmt.Errorf("unexpected status code received: %d for %s", resp.StatusCode, segmentURL)
 	}
 
 	contentType := resp.Header.Get("Content-Type")
@@ -278,6 +278,10 @@ func (c *StreamCoordinator) streamSegment(ctx context.Context, segmentURL string
 		return nil
 	})
 
+}
+
+func isAcceptablePlaylistStatus(statusCode int) bool {
+	return statusCode == http.StatusOK || statusCode == http.StatusPartialContent
 }
 
 func (c *StreamCoordinator) parsePlaylist(mediaURL string, content string) (*PlaylistMetadata, error) {
@@ -339,4 +343,3 @@ func (c *StreamCoordinator) parsePlaylist(mediaURL string, content string) (*Pla
 
 	return metadata, scanner.Err()
 }
-

@@ -4,6 +4,10 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
+	"strings"
+	"sync/atomic"
+	"time"
 	"windows-m3u-stream-merger-proxy/logger"
 	"windows-m3u-stream-merger-proxy/proxy"
 	"windows-m3u-stream-merger-proxy/proxy/client"
@@ -11,10 +15,6 @@ import (
 	"windows-m3u-stream-merger-proxy/proxy/stream/buffer"
 	"windows-m3u-stream-merger-proxy/proxy/stream/config"
 	"windows-m3u-stream-merger-proxy/utils"
-	"net/http"
-	"strings"
-	"sync/atomic"
-	"time"
 )
 
 var safeConcatTypes = map[string]bool{
@@ -78,19 +78,22 @@ func (h *StreamHandler) HandleDirectStream(
 		case <-ctx.Done():
 			return StreamResult{bytesWritten, fmt.Errorf("Context canceled for stream: %s", remoteAddr), proxy.StatusClientClosed}
 		case result := <-readChan:
-			bytesWritten += int64(result.n)
-
-			switch {
-			case result.err == io.EOF:
-				return StreamResult{bytesWritten, fmt.Errorf("EOF reached for stream: %s", remoteAddr), proxy.StatusEOF}
-			case result.err != nil:
-				return StreamResult{bytesWritten, fmt.Errorf("Server error for stream: %s", remoteAddr), proxy.StatusServerError}
-			case result.err == nil:
+			if result.n > 0 {
+				bytesWritten += int64(result.n)
 				if _, err := streamClient.Write(buffer[:result.n]); err != nil {
 					return StreamResult{bytesWritten, fmt.Errorf("Server error for stream: %s", remoteAddr), proxy.StatusClientClosed}
 				}
-
 				streamClient.Flush()
+			}
+
+			switch {
+			case result.err == io.EOF:
+				if bytesWritten == 0 {
+					return StreamResult{0, fmt.Errorf("EOF reached for stream: %s", remoteAddr), proxy.StatusEOF}
+				}
+				return StreamResult{bytesWritten, nil, proxy.StatusCompleted}
+			case result.err != nil:
+				return StreamResult{bytesWritten, fmt.Errorf("Server error for stream: %s", remoteAddr), proxy.StatusServerError}
 			}
 		}
 	}
@@ -135,7 +138,7 @@ func (h *StreamHandler) HandleStream(
 				h.coordinator.FinishWriterSetup()
 				h.coordinator.InitializationMu.Unlock()
 			}()
-			if utils.IsAnM3U8Media(lbResult.Response) {
+			if utils.IsProbablyM3U8(lbResult.Response) {
 				h.coordinator.StartHLSWriter(h.coordinator.WriterCtx, lbResult, streamClient)
 			} else {
 				h.coordinator.StartMediaWriter(h.coordinator.WriterCtx, lbResult)
@@ -207,7 +210,11 @@ func (h *StreamHandler) HandleStream(
 			return StreamResult{bytesWritten, readerCtx.Err(), proxy.StatusClientClosed}
 
 		default:
-			chunks, errChunk, newPos := h.coordinator.ReadChunks(lastPosition)
+			chunks, errChunk, newPos, readErr := h.coordinator.ReadChunks(readerCtx, lastPosition)
+			if readErr != nil {
+				h.logger.Debugf("ReadChunks interrupted for client %s: %v", remoteAddr, readErr)
+				return StreamResult{bytesWritten, readErr, proxy.StatusClientClosed}
+			}
 
 			// Process any available chunks first
 			if len(chunks) > 0 {
@@ -309,4 +316,3 @@ func (h *StreamHandler) safeFlush(streamClient *client.StreamClient) error {
 	streamClient.Flush()
 	return nil
 }
-

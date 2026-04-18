@@ -50,8 +50,8 @@ func (sc *StreamClient) Header() http.Header {
 }
 
 func (sc *StreamClient) WriteHeader(statusCode int) error {
-	if sc.HeadersSent.Load() {
-		// WriteHeader should only be called once.
+	if !sc.HeadersSent.CompareAndSwap(false, true) {
+		// WriteHeader already called, prevent race condition and double calls
 		return nil
 	}
 
@@ -62,7 +62,6 @@ func (sc *StreamClient) WriteHeader(statusCode int) error {
 	}
 
 	sc.respWriter.WriteHeader(statusCode)
-	sc.HeadersSent.Store(true)
 	return nil
 }
 

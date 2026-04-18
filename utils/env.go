@@ -13,6 +13,7 @@ type SourceConfig struct {
 	Index          string
 	URL            string
 	MaxConcurrency int
+	ContainsVOD    bool
 }
 
 func GetEnv(env string) string {
@@ -149,6 +150,7 @@ func SetDynamicSources(sources []SourceConfig) {
 			Index:          index,
 			URL:            url,
 			MaxConcurrency: maxConcurrency,
+			ContainsVOD:    source.ContainsVOD,
 		})
 	}
 
@@ -185,10 +187,18 @@ func loadStaticSources() []SourceConfig {
 			}
 		}
 
+		containsVOD := true
+		if value := strings.TrimSpace(os.Getenv(fmt.Sprintf("M3U_CONTAINS_VOD_%s", indexString))); value != "" {
+			if parsed, err := strconv.ParseBool(value); err == nil {
+				containsVOD = parsed
+			}
+		}
+
 		sources = append(sources, SourceConfig{
 			Index:          indexString,
 			URL:            url,
 			MaxConcurrency: maxConcurrency,
+			ContainsVOD:    containsVOD,
 		})
 	}
 

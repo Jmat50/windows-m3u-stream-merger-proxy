@@ -5,13 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"windows-m3u-stream-merger-proxy/logger"
-	"windows-m3u-stream-merger-proxy/proxy"
-	"windows-m3u-stream-merger-proxy/proxy/client"
-	"windows-m3u-stream-merger-proxy/proxy/loadbalancer"
-	"windows-m3u-stream-merger-proxy/proxy/stream/buffer"
-	"windows-m3u-stream-merger-proxy/proxy/stream/config"
-	"windows-m3u-stream-merger-proxy/store"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -19,6 +12,13 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"windows-m3u-stream-merger-proxy/logger"
+	"windows-m3u-stream-merger-proxy/proxy"
+	"windows-m3u-stream-merger-proxy/proxy/client"
+	"windows-m3u-stream-merger-proxy/proxy/loadbalancer"
+	"windows-m3u-stream-merger-proxy/proxy/stream/buffer"
+	"windows-m3u-stream-merger-proxy/proxy/stream/config"
+	"windows-m3u-stream-merger-proxy/store"
 
 	"math/rand"
 )
@@ -609,3 +609,118 @@ func TestStreamHTTPHandler_ReusesSharedBufferDuringConcurrentStartup(t *testing.
 	}
 }
 
+func TestStreamHTTPHandler_DirectCompletionDoesNotRetry(t *testing.T) {
+	cm := store.NewConcurrencyManager()
+	streamConfig := config.NewDefaultStreamConfig()
+	streamConfig.ChunkSize = 1024 * 1024
+	registry := buffer.NewStreamRegistry(streamConfig, cm, logger.Default, time.Second)
+	registry.Unrestrict = true
+
+	var loadBalancerCalls atomic.Int32
+	manager := &mockStreamManager{}
+
+	manager.loadBalancerFunc = func(ctx context.Context, req *http.Request) (*loadbalancer.LoadBalancerResult, error) {
+		loadBalancerCalls.Add(1)
+		return &loadbalancer.LoadBalancerResult{
+			Response: mockResponse(http.StatusPartialContent, "vod content"),
+			URL:      "http://example.com/vod.ts",
+			Index:    "1",
+			SubIndex: "1",
+		}, nil
+	}
+
+	manager.proxyStreamFunc = func(ctx context.Context, coordinator *buffer.StreamCoordinator, lbRes *loadbalancer.LoadBalancerResult, sClient *client.StreamClient, exitStatus chan<- int) {
+		_ = sClient.WriteHeader(lbRes.Response.StatusCode)
+		exitStatus <- proxy.StatusCompleted
+	}
+
+	manager.getCmFunc = func() *store.ConcurrencyManager {
+		return cm
+	}
+
+	manager.getRegistryFunc = func() *buffer.StreamRegistry {
+		return registry
+	}
+
+	handler := NewStreamHTTPHandler(manager, logger.Default)
+	req := httptest.NewRequest(http.MethodGet, "/p/stream/test.ts", nil)
+	recorder := httptest.NewRecorder()
+
+	handler.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusPartialContent {
+		t.Fatalf("expected HTTP %d, got %d", http.StatusPartialContent, recorder.Code)
+	}
+	if got := loadBalancerCalls.Load(); got != 1 {
+		t.Fatalf("expected direct completion to avoid retries, got %d load balancer calls", got)
+	}
+}
+
+func TestStreamHTTPHandler_WaitsForProxyShutdownOnClientClose(t *testing.T) {
+	cm := store.NewConcurrencyManager()
+	streamConfig := config.NewDefaultStreamConfig()
+	registry := buffer.NewStreamRegistry(streamConfig, cm, logger.Default, time.Second)
+	registry.Unrestrict = true
+
+	cancelSeen := make(chan struct{})
+	releaseExitStatus := make(chan struct{})
+
+	manager := &mockStreamManager{}
+	manager.loadBalancerFunc = func(ctx context.Context, req *http.Request) (*loadbalancer.LoadBalancerResult, error) {
+		return &loadbalancer.LoadBalancerResult{
+			Response: mockResponse(http.StatusOK, "live content"),
+			URL:      "http://example.com/live.ts",
+			Index:    "1",
+			SubIndex: "1",
+		}, nil
+	}
+
+	manager.proxyStreamFunc = func(ctx context.Context, coordinator *buffer.StreamCoordinator, lbRes *loadbalancer.LoadBalancerResult, sClient *client.StreamClient, exitStatus chan<- int) {
+		<-ctx.Done()
+		close(cancelSeen)
+		<-releaseExitStatus
+		exitStatus <- proxy.StatusClientClosed
+	}
+
+	manager.getCmFunc = func() *store.ConcurrencyManager {
+		return cm
+	}
+
+	manager.getRegistryFunc = func() *buffer.StreamRegistry {
+		return registry
+	}
+
+	handler := NewStreamHTTPHandler(manager, logger.Default)
+
+	reqCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	req := httptest.NewRequest(http.MethodGet, "/p/stream/test.ts", nil).WithContext(reqCtx)
+	recorder := httptest.NewRecorder()
+	done := make(chan struct{})
+
+	go func() {
+		handler.ServeHTTP(recorder, req)
+		close(done)
+	}()
+
+	select {
+	case <-cancelSeen:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for proxy shutdown signal")
+	}
+
+	select {
+	case <-done:
+		t.Fatal("ServeHTTP returned before proxy shutdown completed")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	close(releaseExitStatus)
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("ServeHTTP did not finish after proxy shutdown completed")
+	}
+}

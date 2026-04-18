@@ -7,6 +7,26 @@ import (
 	"strings"
 )
 
+var hopByHopRequestHeaders = map[string]struct{}{
+	"Connection":          {},
+	"Keep-Alive":          {},
+	"Proxy-Authenticate":  {},
+	"Proxy-Authorization": {},
+	"Proxy-Connection":    {},
+	"Te":                  {},
+	"Trailer":             {},
+	"Transfer-Encoding":   {},
+	"Upgrade":             {},
+	"Host":                {},
+	"Content-Length":      {},
+}
+
+var internalOnlyRequestHeaders = map[string]struct{}{
+	"Accept-Encoding": {},
+	"If-Range":        {},
+	"Range":           {},
+}
+
 var HTTPClient = &http.Client{
 	CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		userAgent := GetEnv("USER_AGENT")
@@ -19,6 +39,14 @@ var HTTPClient = &http.Client{
 }
 
 func CustomHttpRequest(origReq *http.Request, method string, url string) (*http.Response, error) {
+	return customHttpRequest(origReq, method, url, false)
+}
+
+func CustomInternalHttpRequest(origReq *http.Request, method string, url string) (*http.Response, error) {
+	return customHttpRequest(origReq, method, url, true)
+}
+
+func customHttpRequest(origReq *http.Request, method string, url string, internal bool) (*http.Response, error) {
 	userAgent := GetEnv("USER_AGENT")
 	accept := GetEnv("HTTP_ACCEPT")
 
@@ -33,6 +61,9 @@ func CustomHttpRequest(origReq *http.Request, method string, url string) (*http.
 	if origReq != nil {
 		for header, values := range origReq.Header {
 			canonicalHeader := http.CanonicalHeaderKey(header)
+			if shouldSkipRequestHeader(canonicalHeader, internal) {
+				continue
+			}
 
 			switch canonicalHeader {
 			case "User-Agent":
@@ -60,6 +91,19 @@ func CustomHttpRequest(origReq *http.Request, method string, url string) (*http.
 	}
 
 	return resp, nil
+}
+
+func shouldSkipRequestHeader(header string, internal bool) bool {
+	if _, ok := hopByHopRequestHeaders[header]; ok {
+		return true
+	}
+
+	if !internal {
+		return false
+	}
+
+	_, ok := internalOnlyRequestHeaders[header]
+	return ok
 }
 
 func DetermineBaseURL(r *http.Request) string {

@@ -3,13 +3,13 @@ package failovers
 import (
 	"bufio"
 	"fmt"
+	"net/http"
+	"net/url"
+	"strings"
 	"windows-m3u-stream-merger-proxy/logger"
 	"windows-m3u-stream-merger-proxy/proxy/client"
 	"windows-m3u-stream-merger-proxy/proxy/loadbalancer"
 	"windows-m3u-stream-merger-proxy/utils"
-	"net/http"
-	"net/url"
-	"strings"
 )
 
 type M3U8Processor struct {
@@ -68,9 +68,13 @@ func (p *M3U8Processor) processResponse(
 	if variantURL, isMaster, err := firstMasterVariant(base, lines); err != nil {
 		return err
 	} else if isMaster {
-		nextResp, reqErr := utils.CustomHttpRequest(streamClient.Request, "GET", variantURL)
+		nextResp, reqErr := utils.CustomInternalHttpRequest(streamClient.Request, "GET", variantURL)
 		if reqErr != nil {
 			return fmt.Errorf("failed to fetch master variant %s: %w", variantURL, reqErr)
+		}
+		if nextResp.StatusCode != http.StatusOK && nextResp.StatusCode != http.StatusPartialContent {
+			nextResp.Body.Close()
+			return fmt.Errorf("master variant returned status %d", nextResp.StatusCode)
 		}
 		return p.processResponse(lbResult, streamClient, nextResp, depth+1)
 	}
@@ -192,4 +196,3 @@ func firstMasterVariant(baseURL *url.URL, lines []string) (string, bool, error) 
 
 	return "", false, nil
 }
-

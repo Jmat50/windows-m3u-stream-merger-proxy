@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"net/url"
@@ -28,19 +29,23 @@ import (
 
 const (
 	defaultScanIntervalMinutes = 60
-	defaultMaxDepth            = 2
-	defaultMaxPages            = 150
+	defaultMaxDepth            = 6
+	defaultMaxPages            = 500
 	defaultSourceConcurrency   = 1
 	defaultRequestTimeout      = 20 * time.Second
-	maxValidationBytes         = 64 * 1024
-	discoveryUserAgent         = "WindowsM3UStreamMergerProxyDiscovery/1.0"
+	maxValidationBytes         = 1024 * 1024
+	discoveryRobotsUserAgent   = "WindowsM3UStreamMergerProxyDiscovery"
+	discoveryRequestUserAgent  = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
 
 	katanaRateLimit   = 100
 	katanaConcurrency = 10
 	katanaParallelism = 1
 )
 
-var embeddedPlaylistPattern = regexp.MustCompile(`(?i)https?://[^\s"'<>]+?\.m3u8?(?:\?[^\s"'<>]*)?`)
+var (
+	embeddedPlaylistPattern = regexp.MustCompile(`(?i)(?:(?:https?:)?//|/|\.\./|\./)?[A-Za-z0-9._~!$&()*+,;=:@%/-]+\.m3u8?(?:\?[A-Za-z0-9._~!$&()*+,;=:@%/?-]*)?`)
+	quotedValuePattern      = regexp.MustCompile("[\"'`]([^\"'`\\r\\n]+)[\"'`]")
+)
 
 type Job struct {
 	ID                  string `json:"id,omitempty"`
@@ -234,6 +239,7 @@ func (m *Manager) refreshJob(ctx context.Context, job Job) (bool, error) {
 			Index:          buildDynamicSourceIndex(job, discoveredURL),
 			URL:            discoveredURL,
 			MaxConcurrency: job.SourceConcurrency,
+			ContainsVOD:    true,
 		})
 	}
 
@@ -364,22 +370,49 @@ func (c *crawler) Discover(ctx context.Context) ([]string, error) {
 		Concurrency:            katanaConcurrency,
 		Parallelism:            katanaParallelism,
 		RateLimit:              katanaRateLimit,
+		Retries:                2,
 		KnownFiles:             "all",
 		Strategy:               "breadth-first",
 		FieldScope:             scope,
+		PathClimb:              true,
 		ScrapeJSResponses:      true,
 		ScrapeJSLuiceResponses: true,
-		NoColors:               true,
-		Silent:                 true,
-		DisableUpdateCheck:     true,
-		NoScope:                false,
+		TlsImpersonate:         true,
+		CustomHeaders: []string{
+			fmt.Sprintf("User-Agent: %s", discoveryRequestUserAgent),
+			"Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+			"Accept-Language: en-US,en;q=0.9",
+			"Cache-Control: no-cache",
+			"Pragma: no-cache",
+		},
+		NoColors:           true,
+		Silent:             true,
+		DisableUpdateCheck: true,
+		NoScope:            false,
 		OnResult: func(result output.Result) {
 			if result.Request == nil {
 				return
 			}
-			addCandidate(result.Request.URL)
-			for _, embedded := range extractEmbeddedPlaylistURLs(result.Request.URL) {
+
+			baseURL := result.Request.URL
+			if result.Response != nil && result.Response.Resp != nil && result.Response.Resp.Request != nil && result.Response.Resp.Request.URL != nil {
+				baseURL = result.Response.Resp.Request.URL.String()
+			}
+
+			addCandidate(baseURL)
+			for _, embedded := range extractEmbeddedPlaylistURLs(baseURL, result.Request.URL) {
 				addCandidate(embedded)
+			}
+			if result.Response != nil {
+				for _, embedded := range extractEmbeddedPlaylistURLs(baseURL, result.Response.Body) {
+					addCandidate(embedded)
+				}
+				for _, xhrRequest := range result.Response.XhrRequests {
+					addCandidate(xhrRequest.URL)
+					for _, embedded := range extractEmbeddedPlaylistURLs(baseURL, xhrRequest.URL) {
+						addCandidate(embedded)
+					}
+				}
 			}
 		},
 	}
@@ -431,7 +464,7 @@ func (c *crawler) loadRobots(ctx context.Context) {
 		return
 	}
 	c.robotsData = robotsData
-	c.robotsGrp = robotsData.FindGroup(discoveryUserAgent)
+	c.robotsGrp = robotsData.FindGroup(discoveryRobotsUserAgent)
 }
 
 func (c *crawler) initialSitemapQueue() []string {
@@ -518,8 +551,11 @@ func (c *crawler) fetchDocument(ctx context.Context, rawURL string, limit int64)
 		return document{}, err
 	}
 
-	req.Header.Set("User-Agent", discoveryUserAgent)
-	req.Header.Set("Accept", "application/vnd.apple.mpegurl,application/x-mpegURL,text/plain,*/*")
+	req.Header.Set("User-Agent", discoveryRequestUserAgent)
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,application/vnd.apple.mpegurl,application/x-mpegURL,text/plain,*/*;q=0.8")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("Cache-Control", "no-cache")
+	req.Header.Set("Pragma", "no-cache")
 
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -671,7 +707,7 @@ func extractSitemapLocs(body []byte) ([]string, error) {
 	return locs, nil
 }
 
-func extractEmbeddedPlaylistURLs(raw string) []string {
+func extractEmbeddedPlaylistURLs(baseURL string, raw string) []string {
 	seen := make(map[string]struct{})
 	out := make([]string, 0, 4)
 
@@ -687,30 +723,114 @@ func extractEmbeddedPlaylistURLs(raw string) []string {
 		out = append(out, trimmed)
 	}
 
-	for _, match := range embeddedPlaylistPattern.FindAllString(raw, -1) {
-		appendUnique(match)
+	addCandidate := func(candidate string) {
+		if normalized, ok := normalizeEmbeddedPlaylistURL(baseURL, candidate); ok {
+			appendUnique(normalized)
+		}
 	}
+
+	collectCandidates := func(value string) {
+		if strings.TrimSpace(value) == "" {
+			return
+		}
+
+		variants := []string{
+			value,
+			html.UnescapeString(value),
+			strings.ReplaceAll(value, `\/`, `/`),
+			strings.ReplaceAll(html.UnescapeString(value), `\/`, `/`),
+		}
+		for _, variant := range variants {
+			lower := strings.ToLower(variant)
+			if strings.Contains(lower, ".m3u") {
+				for _, match := range embeddedPlaylistPattern.FindAllString(variant, -1) {
+					addCandidate(match)
+				}
+				addCandidate(variant)
+			}
+
+			for _, match := range quotedValuePattern.FindAllStringSubmatch(variant, -1) {
+				if len(match) < 2 {
+					continue
+				}
+				if strings.Contains(strings.ToLower(match[1]), ".m3u") {
+					addCandidate(match[1])
+				}
+			}
+		}
+	}
+
+	collectCandidates(raw)
 
 	parsed, err := url.Parse(raw)
 	if err == nil && parsed.RawQuery != "" {
 		values := parsed.Query()
 		for _, itemValues := range values {
 			for _, item := range itemValues {
-				decoded := item
+				collectCandidates(item)
 				if unescaped, decodeErr := url.QueryUnescape(item); decodeErr == nil {
-					decoded = unescaped
-				}
-				for _, match := range embeddedPlaylistPattern.FindAllString(decoded, -1) {
-					appendUnique(match)
-				}
-				if strings.Contains(strings.ToLower(decoded), ".m3u") {
-					appendUnique(decoded)
+					collectCandidates(unescaped)
 				}
 			}
 		}
 	}
 
 	return out
+}
+
+func normalizeEmbeddedPlaylistURL(baseURL string, candidate string) (string, bool) {
+	value := strings.TrimSpace(candidate)
+	if value == "" {
+		return "", false
+	}
+
+	value = html.UnescapeString(value)
+	value = strings.ReplaceAll(value, `\/`, `/`)
+	value = strings.Trim(value, "\"'`()[]{}<>,")
+	if value == "" {
+		return "", false
+	}
+	if strings.HasPrefix(strings.ToLower(value), "javascript:") {
+		return "", false
+	}
+	if !strings.Contains(strings.ToLower(value), ".m3u") {
+		return "", false
+	}
+
+	if unescaped, err := url.QueryUnescape(value); err == nil {
+		value = unescaped
+	}
+
+	if strings.HasPrefix(value, "//") {
+		base, err := url.Parse(baseURL)
+		if err != nil || base.Scheme == "" {
+			return "", false
+		}
+		value = base.Scheme + ":" + value
+	}
+
+	parsed, err := url.Parse(value)
+	if err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") {
+		parsed.Fragment = ""
+		return parsed.String(), true
+	}
+
+	base, err := url.Parse(baseURL)
+	if err != nil {
+		return "", false
+	}
+
+	ref, err := url.Parse(value)
+	if err != nil {
+		return "", false
+	}
+
+	resolved := base.ResolveReference(ref)
+	resolved.Fragment = ""
+	if resolved.Scheme != "http" && resolved.Scheme != "https" {
+		return "", false
+	}
+	return resolved.String(), true
 }
 
 func dedupe(values []string) []string {

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,19 +17,35 @@ import (
 	"windows-m3u-stream-merger-proxy/proxy"
 	"windows-m3u-stream-merger-proxy/proxy/client"
 	"windows-m3u-stream-merger-proxy/proxy/loadbalancer"
+	"windows-m3u-stream-merger-proxy/proxy/stream/buffer"
+	"windows-m3u-stream-merger-proxy/proxy/stream/config"
 	"windows-m3u-stream-merger-proxy/proxy/stream/failovers"
 	"windows-m3u-stream-merger-proxy/utils"
 )
 
 type StreamHTTPHandler struct {
-	manager ProxyInstance
-	logger  logger.Logger
+	manager             ProxyInstance
+	logger              logger.Logger
+	sharedBufferEnabled bool
+}
+
+func parseBoolEnv(name string, defaultValue bool) bool {
+	value, ok := os.LookupEnv(name)
+	if !ok {
+		return defaultValue
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return defaultValue
+	}
+	return parsed
 }
 
 func NewStreamHTTPHandler(manager ProxyInstance, logger logger.Logger) *StreamHTTPHandler {
 	return &StreamHTTPHandler{
-		manager: manager,
-		logger:  logger,
+		manager:             manager,
+		logger:              logger,
+		sharedBufferEnabled: parseBoolEnv("SHARED_BUFFER", true),
 	}
 }
 
@@ -63,8 +80,14 @@ func (h *StreamHTTPHandler) handleStream(ctx context.Context, streamClient *clie
 		return
 	}
 
+	if !h.sharedBufferEnabled {
+		h.handleStreamWithoutSharedBuffer(ctx, streamClient, streamURL)
+		return
+	}
+
 	coordinator := h.manager.GetStreamRegistry().GetOrCreateCoordinator(streamURL)
 	failedIndexes := make(map[string]struct{})
+	const shutdownGracePeriod = time.Second
 
 	for {
 		lbResult := coordinator.GetWriterLBResult()
@@ -124,15 +147,20 @@ func (h *StreamHTTPHandler) handleStream(ctx context.Context, streamClient *clie
 
 		proxyCtx, cancel := context.WithCancel(ctx)
 		go func() {
-			defer cancel()
 			h.manager.ProxyStream(proxyCtx, coordinator, lbResult, streamClient, exitStatus)
 		}()
 
 		select {
 		case <-ctx.Done():
+			cancel()
+			select {
+			case <-exitStatus:
+			case <-time.After(shutdownGracePeriod):
+			}
 			h.logger.Logf("Client has closed the stream: %s", r.RemoteAddr)
 			return
 		case code := <-exitStatus:
+			cancel()
 			done, penalize := h.handleExitCode(code, r)
 			if penalize && lbResult != nil {
 				failedIndexes[lbResult.Index] = struct{}{}
@@ -146,6 +174,89 @@ func (h *StreamHTTPHandler) handleStream(ctx context.Context, streamClient *clie
 				return
 			}
 			// Otherwise, retry with a new lbResult.
+		}
+
+		select {
+		case <-ctx.Done():
+			h.logger.Logf("Client has closed the stream: %s", r.RemoteAddr)
+			return
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
+func (h *StreamHTTPHandler) handleStreamWithoutSharedBuffer(ctx context.Context, streamClient *client.StreamClient, streamURL string) {
+	r := streamClient.Request
+	failedIndexes := make(map[string]struct{})
+	const shutdownGracePeriod = time.Second
+
+	for {
+		// Create a fresh coordinator for each attempt to avoid stale state
+		coordinator := buffer.NewStreamCoordinator(streamURL, config.NewDefaultStreamConfig(), h.manager.GetConcurrencyManager(), h.logger)
+
+		lbCtx := ctx
+		lbReq := r
+		if len(failedIndexes) > 0 {
+			excluded := make([]string, 0, len(failedIndexes))
+			for index := range failedIndexes {
+				excluded = append(excluded, index)
+			}
+			sort.Strings(excluded)
+			h.logger.Logf(
+				"Retrying stream %s while excluding failed sources: %s",
+				streamURL,
+				strings.Join(excluded, ", "),
+			)
+			lbCtx = loadbalancer.WithExcludedIndexes(ctx, excluded)
+			lbReq = r.Clone(lbCtx)
+		}
+
+		lbResult, err := h.manager.LoadBalancer(lbCtx, lbReq)
+		if err != nil {
+			if len(failedIndexes) > 0 {
+				h.logger.Warnf(
+					"Load balancer failed with source exclusions for %s. Clearing exclusions and retrying all sources once.",
+					streamURL,
+				)
+				clear(failedIndexes)
+				continue
+			}
+			h.logger.Logf("Load balancer error (%s): %v", r.URL.Path, err)
+			h.writeStreamError(streamClient, http.StatusBadGateway, fmt.Sprintf("Upstream stream selection failed: %v", err))
+			return
+		}
+
+		exitStatus := make(chan int)
+		h.logger.Logf("Proxying %s to %s without shared buffer", r.URL.Path, lbResult.URL)
+
+		proxyCtx, cancel := context.WithCancel(ctx)
+		go func() {
+			h.manager.ProxyStream(proxyCtx, coordinator, lbResult, streamClient, exitStatus)
+		}()
+
+		select {
+		case <-ctx.Done():
+			cancel()
+			select {
+			case <-exitStatus:
+			case <-time.After(shutdownGracePeriod):
+			}
+			h.logger.Logf("Client has closed the stream: %s", r.RemoteAddr)
+			return
+		case code := <-exitStatus:
+			cancel()
+			done, penalize := h.handleExitCode(code, r)
+			if penalize && lbResult != nil {
+				failedIndexes[lbResult.Index] = struct{}{}
+				h.logger.Warnf(
+					"Source M3U_%s failed during active stream for %s. Trying alternate source.",
+					lbResult.Index,
+					streamURL,
+				)
+			}
+			if done {
+				return
+			}
 		}
 
 		select {
@@ -183,6 +294,9 @@ func (h *StreamHTTPHandler) handleExitCode(code int, r *http.Request) (done bool
 	case proxy.StatusM3U8Parsed:
 		h.logger.Debugf("Finished handling M3U8 %s request: %s", r.Method,
 			r.RemoteAddr)
+		return true, false
+	case proxy.StatusCompleted:
+		h.logger.Debugf("Finished handling direct %s request: %s", r.Method, r.RemoteAddr)
 		return true, false
 	case proxy.StatusM3U8ParseError:
 		h.logger.Errorf("Finished handling M3U8 %s request but failed to parse contents.",
@@ -262,4 +376,3 @@ func isBrokenPipe(err error) bool {
 	return strings.Contains(err.Error(), "broken pipe") ||
 		strings.Contains(err.Error(), "connection reset by peer")
 }
-
