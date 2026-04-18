@@ -3,6 +3,8 @@ package loadbalancer
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"windows-m3u-stream-merger-proxy/logger"
 	"windows-m3u-stream-merger-proxy/proxy"
 	"windows-m3u-stream-merger-proxy/sourceproc"
@@ -438,14 +440,64 @@ func (instance *LoadBalancerInstance) tryStreamUrls(
 				newReq.Header.Set("Accept", accept)
 			}
 
-			// Do the HTTP request.
-			resp, err := instance.healthClient.Do(newReq)
-			if err != nil {
-				instance.logger.Errorf("Error fetching stream: %s", err.Error())
-				instance.markTested(streamId, candidateId)
-				resultCh <- &streamTestResult{err: err}
-				return
+			var resp *http.Response
+
+			// Handle file:// URLs specially
+			if strings.HasPrefix(url, "file://") {
+				filePath := strings.TrimPrefix(url, "file://")
+				file, err := os.Open(filePath)
+				if err != nil {
+					instance.logger.Errorf("Error opening local file %s: %s", filePath, err.Error())
+					instance.markTested(streamId, candidateId)
+					resultCh <- &streamTestResult{err: err}
+					return
+				}
+				defer file.Close()
+
+				// Get file info for content type detection
+				fileInfo, err := file.Stat()
+				if err != nil {
+					instance.logger.Errorf("Error getting file info for %s: %s", filePath, err.Error())
+					instance.markTested(streamId, candidateId)
+					resultCh <- &streamTestResult{err: err}
+					return
+				}
+
+				// Create a response-like object for local files
+				resp = &http.Response{
+					StatusCode:    http.StatusOK,
+					Header:        make(http.Header),
+					Body:          file,
+					ContentLength: fileInfo.Size(),
+					Request:       newReq,
+				}
+
+				// Set content type based on file extension
+				contentType := "application/octet-stream"
+				if ext := strings.ToLower(filepath.Ext(filePath)); ext != "" {
+					switch ext {
+					case ".ts":
+						contentType = "video/MP2T"
+					case ".mp4":
+						contentType = "video/mp4"
+					case ".m3u8":
+						contentType = "application/x-mpegURL"
+					case ".m3u":
+						contentType = "audio/x-mpegurl"
+					}
+				}
+				resp.Header.Set("Content-Type", contentType)
+			} else {
+				// Do the HTTP request for non-file URLs.
+				resp, err = instance.healthClient.Do(newReq)
+				if err != nil {
+					instance.logger.Errorf("Error fetching stream: %s", err.Error())
+					instance.markTested(streamId, candidateId)
+					resultCh <- &streamTestResult{err: err}
+					return
+				}
 			}
+
 			if resp == nil {
 				instance.logger.Errorf("Received nil response from HTTP client")
 				instance.markTested(streamId, candidateId)

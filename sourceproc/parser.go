@@ -27,6 +27,21 @@ func parseLine(line string, nextLine *LineDetails, m3uIndex string) *StreamInfo 
 	logger.Default.Debugf("Next line: %s", nextLine.Content)
 
 	cleanUrl := strings.TrimSpace(nextLine.Content)
+
+	// Resolve relative URLs for local M3U sources
+	if sourceConfig, ok := utils.GetSourceConfig(m3uIndex); ok && strings.HasPrefix(sourceConfig.URL, "file://") {
+		if !strings.HasPrefix(cleanUrl, "http://") && !strings.HasPrefix(cleanUrl, "https://") && !strings.HasPrefix(cleanUrl, "file://") {
+			// This is a relative URL in a local M3U file, resolve it relative to the M3U file's directory
+			m3uPath := strings.TrimPrefix(sourceConfig.URL, "file://")
+			m3uDir := filepath.Dir(m3uPath)
+			resolvedPath := filepath.Join(m3uDir, cleanUrl)
+			absPath, err := filepath.Abs(resolvedPath)
+			if err == nil {
+				cleanUrl = "file://" + absPath
+			}
+		}
+	}
+
 	stream := &StreamInfo{
 		URLs: xsync.NewMapOf[string, map[string]string](),
 	}

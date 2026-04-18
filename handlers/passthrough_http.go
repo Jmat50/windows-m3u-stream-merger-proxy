@@ -4,6 +4,9 @@ import (
 	"encoding/base64"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 
 	"windows-m3u-stream-merger-proxy/logger"
@@ -43,6 +46,48 @@ func (h *PassthroughHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 	}
 
 	originalURL := string(originalURLBytes)
+
+	// Handle file:// URLs specially
+	if strings.HasPrefix(originalURL, "file://") {
+		filePath := strings.TrimPrefix(originalURL, "file://")
+		file, err := os.Open(filePath)
+		if err != nil {
+			h.logger.Error("Failed to open local file: " + err.Error())
+			http.Error(w, "Error opening local file", http.StatusNotFound)
+			return
+		}
+		defer file.Close()
+
+		// Get file info
+		fileInfo, err := file.Stat()
+		if err != nil {
+			h.logger.Error("Failed to get file info: " + err.Error())
+			http.Error(w, "Error reading file info", http.StatusInternalServerError)
+			return
+		}
+
+		// Set content type based on file extension
+		contentType := "application/octet-stream"
+		if ext := strings.ToLower(filepath.Ext(filePath)); ext != "" {
+			switch strings.ToLower(ext) {
+			case ".png":
+				contentType = "image/png"
+			case ".jpg", ".jpeg":
+				contentType = "image/jpeg"
+			case ".gif":
+				contentType = "image/gif"
+			case ".webp":
+				contentType = "image/webp"
+			}
+		}
+		w.Header().Set("Content-Type", contentType)
+		w.Header().Set("Content-Length", strconv.FormatInt(fileInfo.Size(), 10))
+
+		if _, err := io.Copy(w, file); err != nil {
+			h.logger.Error("Failed to write file response: " + err.Error())
+		}
+		return
+	}
 
 	proxyReq, err := http.NewRequest(r.Method, originalURL, r.Body)
 	if err != nil {

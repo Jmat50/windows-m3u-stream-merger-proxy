@@ -513,34 +513,42 @@ class DesktopApp(tk.Tk):
 
         source_actions = ttk.Frame(source_list_frame)
         source_actions.grid(row=0, column=2, sticky="ne", padx=(6, 0), pady=(2, 0))
+        source_actions.columnconfigure(0, weight=0)
+        source_actions.columnconfigure(1, weight=0)
         ttk.Button(
             source_actions,
             image=self.source_action_icons["add"],
             command=self._open_add_source_dialog,
             style="SourceIcon.TButton",
-            width=2,
-        ).grid(row=0, column=0, pady=(0, 4))
+            width=3,
+            compound=tk.CENTER,
+        ).grid(row=0, column=0, padx=(0, 4), pady=(0, 4))
         ttk.Button(
             source_actions,
             image=self.source_action_icons["remove"],
             command=self._remove_source_item_clicked,
             style="SourceIcon.TButton",
-            width=2,
-        ).grid(row=1, column=0, pady=(0, 4))
+            width=3,
+            compound=tk.CENTER,
+        ).grid(row=1, column=0, padx=(0, 4), pady=(0, 4))
         ttk.Button(
             source_actions,
+            text="▲",
             image=self.source_action_icons["up"],
             command=self._move_source_up_clicked,
             style="SourceIcon.TButton",
-            width=2,
-        ).grid(row=2, column=0, pady=(0, 4))
+            width=3,
+            compound=tk.CENTER,
+        ).grid(row=0, column=1, pady=(0, 4))
         ttk.Button(
             source_actions,
+            text="▼",
             image=self.source_action_icons["down"],
             command=self._move_source_down_clicked,
             style="SourceIcon.TButton",
-            width=2,
-        ).grid(row=3, column=0)
+            width=3,
+            compound=tk.CENTER,
+        ).grid(row=1, column=1)
 
         controls = ttk.Frame(root)
         controls.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(10, 0))
@@ -624,7 +632,7 @@ class DesktopApp(tk.Tk):
         self.log_text.configure(yscrollcommand=logs_scroll_y.set)
 
     def _create_source_toolbar_icon(self, action: str) -> tk.PhotoImage:
-        size = 18
+        size = 20
         icon = Image.new("RGBA", (size, size), (0, 0, 0, 0))
         draw = ImageDraw.Draw(icon)
         draw.rounded_rectangle((1, 1, size - 2, size - 2), radius=4, fill=(241, 244, 247, 255), outline=(157, 166, 176, 255))
@@ -638,11 +646,11 @@ class DesktopApp(tk.Tk):
         elif action == "remove":
             draw.line((5, center, size - 5, center), fill=fg, width=2)
         elif action == "up":
-            draw.polygon([(center, 4), (5, 10), (size - 5, 10)], fill=fg)
-            draw.rectangle((center - 1, 10, center + 1, size - 4), fill=fg)
+            draw.polygon([(center, 4), (5, 11), (size - 5, 11)], fill=fg)
+            draw.rectangle((center - 1, 11, center + 1, size - 4), fill=fg)
         elif action == "down":
-            draw.rectangle((center - 1, 4, center + 1, size - 10), fill=fg)
-            draw.polygon([(5, size - 10), (size - 5, size - 10), (center, size - 4)], fill=fg)
+            draw.rectangle((center - 1, 4, center + 1, size - 11), fill=fg)
+            draw.polygon([(5, size - 11), (size - 5, size - 11), (center, size - 4)], fill=fg)
         else:
             draw.ellipse((6, 6, size - 6, size - 6), fill=fg)
 
@@ -722,13 +730,49 @@ class DesktopApp(tk.Tk):
         self.shared_buffer_var.set(bool(settings.get("shared_buffer", DEFAULT_SETTINGS["shared_buffer"])))
 
         self.sources_items = self._normalize_sources(settings.get("sources", []))
+        self.web_discovery_jobs = self._normalize_web_discovery_jobs(settings.get("web_discovery_jobs"))
+        self._ensure_web_discovery_job_sources()
         self._refresh_sources_tree()
         self._clear_source_editor()
         self.include_title_filters = self._normalize_filter_list(settings.get("include_title_filters"))
         self.exclude_title_filters = self._normalize_filter_list(settings.get("exclude_title_filters"))
         self.channel_source_rules = self._normalize_channel_source_rules(settings.get("channel_source_rules"))
         self.channel_merge_rules = self._normalize_channel_merge_rules(settings.get("channel_merge_rules"))
-        self.web_discovery_jobs = self._normalize_web_discovery_jobs(settings.get("web_discovery_jobs"))
+
+    def _ensure_web_discovery_job_sources(self) -> None:
+        existing_urls = {str(source.get("url", "")).strip() for source in self.sources_items if str(source.get("url", "")).strip()}
+        changed = False
+
+        for job in self.web_discovery_jobs:
+            start_url = str(job.get("start_url", "")).strip()
+            if not start_url:
+                continue
+            if start_url in existing_urls:
+                continue
+            parsed = urllib.parse.urlparse(start_url)
+            path = parsed.path if parsed.scheme in {"http", "https", "file"} else start_url
+            if not Path(path).suffix.lower() in {".m3u", ".m3u8"}:
+                continue
+
+            raw_name = str(job.get("name", "")).strip() or f"Web Discovery {len(self.sources_items) + 1}"
+            formatted_name = (
+                raw_name
+                if raw_name.lower().endswith(" (web discovery)")
+                else f"{raw_name} (Web Discovery)"
+            )
+            self.sources_items.append(
+                {
+                    "name": formatted_name,
+                    "url": start_url,
+                    "concurrency": str(job.get("source_concurrency", 1)) or "1",
+                    "contains_vod": True,
+                }
+            )
+            existing_urls.add(start_url)
+            changed = True
+
+        if changed:
+            self._set_last_event("Added discovered playlist source(s) from web discovery jobs.")
 
     def _reset_settings_to_defaults_clicked(self) -> None:
         self._apply_settings_to_ui(DEFAULT_SETTINGS)
@@ -960,11 +1004,28 @@ class DesktopApp(tk.Tk):
         url_entry = ttk.Entry(frame, textvariable=url_var)
         url_entry.grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=(10, 0))
 
-        ttk.Label(frame, text="Max Concurrency").grid(row=2, column=0, sticky="w", pady=(10, 0))
-        concurrency_entry = ttk.Entry(frame, textvariable=concurrency_var, width=8)
-        concurrency_entry.grid(row=2, column=1, sticky="w", padx=(8, 0), pady=(10, 0))
+        browse_frame = ttk.Frame(frame)
+        browse_frame.grid(row=2, column=1, sticky="w", padx=(8, 0), pady=(4, 0))
+        def browse_source_file() -> None:
+            selected = filedialog.askopenfilename(
+                parent=popup,
+                title="Browse M3U Source",
+                filetypes=[("M3U playlist files", "*.m3u *.m3u8"), ("All files", "*")],
+            )
+            if not selected:
+                return
+            file_url = str(Path(selected).as_uri())
+            url_var.set(file_url)
+            if not name_var.get().strip():
+                name_var.set(Path(selected).stem)
 
-        ttk.Checkbutton(frame, text="Contains VOD", variable=contains_vod_var).grid(row=3, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        ttk.Button(browse_frame, text="Browse...", command=browse_source_file).pack(side=tk.LEFT)
+
+        ttk.Label(frame, text="Max Concurrency").grid(row=3, column=0, sticky="w", pady=(10, 0))
+        concurrency_entry = ttk.Entry(frame, textvariable=concurrency_var, width=8)
+        concurrency_entry.grid(row=3, column=1, sticky="w", padx=(8, 0), pady=(10, 0))
+
+        ttk.Checkbutton(frame, text="Contains VOD", variable=contains_vod_var).grid(row=4, column=0, columnspan=2, sticky="w", pady=(10, 0))
 
         ttk.Label(
             frame,
@@ -1389,7 +1450,8 @@ class DesktopApp(tk.Tk):
 
         def save_popup_settings() -> None:
             self.web_discovery_jobs = self._normalize_web_discovery_jobs(jobs)
-
+            self._ensure_web_discovery_job_sources()
+            self._refresh_sources_tree()
             try:
                 settings = self._collect_settings()
                 self._persist_settings(settings, sync_start_on_boot=True, show_dialogs=False, log_event=False)
