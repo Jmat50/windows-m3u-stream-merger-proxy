@@ -106,7 +106,7 @@ func Initialize(ctx context.Context, log logger.Logger, onSourcesChanged func())
 	}
 
 	manager.logger.Logf("[DISCOVERY] Loaded %d web discovery job(s).", len(jobs))
-	manager.refreshAll(ctx, false)
+	manager.refreshAll(ctx, true)
 
 	for _, job := range jobs {
 		job := job
