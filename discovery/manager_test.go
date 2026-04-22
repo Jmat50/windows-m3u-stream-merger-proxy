@@ -171,3 +171,99 @@ func TestCrawlerDiscoversPlaylistViaScriptLoadedPage(t *testing.T) {
 		t.Fatalf("Discover() = %v, want [%q]", got, want)
 	}
 }
+
+func TestValidatePlaylistAcceptsRedirectedPlaylist(t *testing.T) {
+	redirectTarget := ""
+	serverA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			fmt.Fprint(w, `<html><body><a href="/playlist.m3u">link</a></body></html>`)
+		case "/playlist.m3u":
+			http.Redirect(w, r, redirectTarget, http.StatusFound)
+		case "/actual.m3u":
+			fmt.Fprint(w, "#EXTM3U\n#EXTINF:-1,Redirected\nhttp://example.com/stream.ts\n")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer serverA.Close()
+	redirectTarget = serverA.URL + "/actual.m3u"
+
+	job := Job{
+		ID:                  "1",
+		Name:                "Redirect Discovery",
+		StartURL:            serverA.URL,
+		ScanIntervalMinutes: 60,
+		Recursive:           true,
+		MaxDepth:            2,
+		MaxPages:            20,
+		FollowRobots:        false,
+		SourceConcurrency:   1,
+		Enabled:             true,
+	}
+
+	crawler, err := newCrawler(job, logger.Default)
+	if err != nil {
+		t.Fatalf("newCrawler() error = %v", err)
+	}
+
+	url, ok := crawler.validatePlaylist(context.Background(), make(map[string]string), serverA.URL+"/playlist.m3u")
+	if !ok {
+		t.Fatalf("validatePlaylist() returned false, expected true")
+	}
+	if url != serverA.URL+"/actual.m3u" {
+		t.Fatalf("validatePlaylist() returned %q, want %q", url, serverA.URL+"/actual.m3u")
+	}
+}
+
+func TestCrawlerDiscoversExternalPlaylistHost(t *testing.T) {
+	external := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/playlist.m3u8" {
+			fmt.Fprint(w, "#EXTM3U\n#EXT-X-VERSION:3\n")
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer external.Close()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `<html><body><a href="%s/playlist.m3u8">external playlist</a></body></html>`, external.URL)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	job := Job{
+		ID:                  "1",
+		Name:                "External Playlist Discovery",
+		StartURL:            server.URL,
+		ScanIntervalMinutes: 60,
+		Recursive:           true,
+		MaxDepth:            2,
+		MaxPages:            20,
+		FollowRobots:        false,
+		SourceConcurrency:   1,
+		Enabled:             true,
+	}
+
+	crawler, err := newCrawler(job, logger.Default)
+	if err != nil {
+		t.Fatalf("newCrawler() error = %v", err)
+	}
+
+	got, err := crawler.Discover(context.Background())
+	if err != nil {
+		t.Fatalf("Discover() error = %v", err)
+	}
+
+	want := []string{external.URL + "/playlist.m3u8"}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("Discover() = %v, want %v", got, want)
+	}
+}
+
+func TestIsM3UContentHandlesBOM(t *testing.T) {
+	if !utils.IsM3UContent([]byte("\ufeff#EXTM3U\n#EXTINF:-1,Test\nhttp://example.com/stream.ts\n")) {
+		t.Fatal("IsM3UContent() should return true for BOM-prefixed playlists")
+	}
+}

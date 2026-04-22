@@ -300,7 +300,7 @@ func (p *M3UProcessor) handleDownloaded(result *SourceDownloaderResult, streamCh
 	// Process lines as they come in
 	for lineInfo := range result.Lines {
 		line := strings.TrimSpace(lineInfo.Content)
-		if strings.HasPrefix(line, "#EXTINF:") {
+		if strings.HasPrefix(line, "#EXTINF:") || strings.HasPrefix(line, "#EXT-X-STREAM-INF:") {
 			currentLine = line
 		} else if currentLine != "" && !strings.HasPrefix(line, "#") {
 			if streamInfo := parseLine(currentLine, lineInfo, result.Index); streamInfo != nil {
@@ -319,4 +319,3 @@ func createResultFile(path string) (*os.File, error) {
 	}
 	return os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
 }
-

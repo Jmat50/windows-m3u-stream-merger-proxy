@@ -4,13 +4,13 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
-	"windows-m3u-stream-merger-proxy/config"
-	"windows-m3u-stream-merger-proxy/logger"
-	"windows-m3u-stream-merger-proxy/utils"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"windows-m3u-stream-merger-proxy/config"
+	"windows-m3u-stream-merger-proxy/logger"
+	"windows-m3u-stream-merger-proxy/utils"
 
 	"github.com/puzpuzpuz/xsync/v3"
 	"golang.org/x/crypto/sha3"
@@ -32,12 +32,15 @@ func parseLine(line string, nextLine *LineDetails, m3uIndex string) *StreamInfo 
 	if sourceConfig, ok := utils.GetSourceConfig(m3uIndex); ok && strings.HasPrefix(sourceConfig.URL, "file://") {
 		if !strings.HasPrefix(cleanUrl, "http://") && !strings.HasPrefix(cleanUrl, "https://") && !strings.HasPrefix(cleanUrl, "file://") {
 			// This is a relative URL in a local M3U file, resolve it relative to the M3U file's directory
-			m3uPath := strings.TrimPrefix(sourceConfig.URL, "file://")
-			m3uDir := filepath.Dir(m3uPath)
-			resolvedPath := filepath.Join(m3uDir, cleanUrl)
-			absPath, err := filepath.Abs(resolvedPath)
+			m3uPath := sourceConfig.URL
+			resolvedPath, err := utils.FileURLToPath(m3uPath)
 			if err == nil {
-				cleanUrl = "file://" + absPath
+				m3uDir := filepath.Dir(resolvedPath)
+				relativeResolvedPath := filepath.Join(m3uDir, cleanUrl)
+				absPath, err := filepath.Abs(relativeResolvedPath)
+				if err == nil {
+					cleanUrl = "file://" + filepath.ToSlash(absPath)
+				}
 			}
 		}
 	}
@@ -77,7 +80,7 @@ func parseLine(line string, nextLine *LineDetails, m3uIndex string) *StreamInfo 
 	stream.Title = applyChannelMergeRule(stream.Title)
 
 	if stream.Title == "" {
-		return nil
+		stream.Title = "Unknown Channel"
 	}
 
 	_, _ = stream.URLs.LoadOrStore(m3uIndex, make(map[string]string))
@@ -161,4 +164,3 @@ func formatStreamEntry(baseURL string, stream *StreamInfo) string {
 
 	return entry.String()
 }
-

@@ -60,28 +60,37 @@ func (*DefaultLogger) Debugf(format string, v ...any) {
 }
 
 func (*DefaultLogger) Error(format string) {
+	message := fmt.Sprintf("%s", format)
 	logger.Error().Msg(safeLogf("%s", format))
+	reporter.record("ERROR", message)
 }
 
 func (*DefaultLogger) Errorf(format string, v ...any) {
 	logString := fmt.Sprintf(format, v...)
 	logger.Error().Msg(safeLogf("%s", logString))
+	reporter.record("ERROR", logString)
 }
 
 func (*DefaultLogger) Warn(format string) {
+	message := fmt.Sprintf("%s", format)
 	logger.Warn().Msg(safeLogf("%s", format))
+	reporter.record("WARN", message)
 }
 
 func (*DefaultLogger) Warnf(format string, v ...any) {
 	logString := fmt.Sprintf(format, v...)
 	logger.Warn().Msg(safeLogf("%s", logString))
+	reporter.record("WARN", logString)
 }
 
 func (*DefaultLogger) Fatal(format string) {
+	message := fmt.Sprintf("%s", format)
 	logger.Fatal().Msg(safeLogf("%s", format))
+	reporter.record("FATAL", message)
 }
 
 func (*DefaultLogger) Fatalf(format string, v ...any) {
 	logString := fmt.Sprintf(format, v...)
 	logger.Fatal().Msg(safeLogf("%s", logString))
+	reporter.record("FATAL", logString)
 }

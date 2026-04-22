@@ -2,6 +2,7 @@ package utils
 
 import (
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -88,5 +89,14 @@ func TestGetSourceConfigs_ReadsContainsVODOverride(t *testing.T) {
 
 	if sources[0].ContainsVOD {
 		t.Fatalf("GetSourceConfigs()[0].ContainsVOD = true, want false")
+	}
+}
+
+func TestGetEnvHttpAcceptIncludesPlaylistTypes(t *testing.T) {
+	_ = os.Unsetenv("HTTP_ACCEPT")
+
+	accept := GetEnv("HTTP_ACCEPT")
+	if !strings.Contains(accept, "application/vnd.apple.mpegurl") || !strings.Contains(accept, "application/x-mpegURL") {
+		t.Fatalf("GetEnv(\"HTTP_ACCEPT\") = %q, want playlist MIME types included", accept)
 	}
 }

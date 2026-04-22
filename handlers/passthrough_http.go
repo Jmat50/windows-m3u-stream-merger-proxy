@@ -49,7 +49,12 @@ func (h *PassthroughHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 
 	// Handle file:// URLs specially
 	if strings.HasPrefix(originalURL, "file://") {
-		filePath := strings.TrimPrefix(originalURL, "file://")
+		filePath, err := utils.FileURLToPath(originalURL)
+		if err != nil {
+			h.logger.Error("Invalid local file URL: " + err.Error())
+			http.Error(w, "Error opening local file", http.StatusBadRequest)
+			return
+		}
 		file, err := os.Open(filePath)
 		if err != nil {
 			h.logger.Error("Failed to open local file: " + err.Error())
@@ -119,4 +124,3 @@ func (h *PassthroughHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		h.logger.Error("Failed to write response body: " + err.Error())
 	}
 }
-

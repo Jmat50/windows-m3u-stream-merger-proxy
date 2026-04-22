@@ -4,6 +4,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -46,5 +48,45 @@ func TestIsProbablyMedia_WithMediaResponse(t *testing.T) {
 
 	if !IsProbablyMedia(resp) {
 		t.Fatalf("IsProbablyMedia() = false, want true for media response")
+	}
+}
+
+func TestFileURLToPath_ValidFileURL(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		expected := filepath.Join("C:", "Temp", "playlist.m3u8")
+		input := "file:///C:/Temp/playlist.m3u8"
+		path, err := FileURLToPath(input)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if path != expected {
+			t.Fatalf("FileURLToPath() = %q, want %q", path, expected)
+		}
+	} else {
+		expected := "/tmp/playlist.m3u8"
+		input := "file:///tmp/playlist.m3u8"
+		path, err := FileURLToPath(input)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if path != expected {
+			t.Fatalf("FileURLToPath() = %q, want %q", path, expected)
+		}
+	}
+}
+
+func TestFileURLToPath_FallbackWindowsLegacyURL(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("windows-specific file URL format")
+	}
+
+	input := "file://C:/Temp/playlist.m3u8"
+	expected := filepath.Join("C:", "Temp", "playlist.m3u8")
+	path, err := FileURLToPath(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if path != expected {
+		t.Fatalf("FileURLToPath() = %q, want %q", path, expected)
 	}
 }

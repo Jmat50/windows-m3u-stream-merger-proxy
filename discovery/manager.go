@@ -326,8 +326,10 @@ func (c *crawler) Discover(ctx context.Context) ([]string, error) {
 		if err != nil {
 			return
 		}
-		if !c.isCandidatePlaylistURL(normalized) || !c.shouldVisitURL(normalized) {
-			return
+		if !c.isCandidatePlaylistURL(normalized) {
+			if !c.shouldVisitURL(normalized) {
+				return
+			}
 		}
 
 		mu.Lock()
@@ -532,11 +534,7 @@ func (c *crawler) validatePlaylist(ctx context.Context, cache map[string]string,
 		cache[candidateURL] = ""
 		return "", false
 	}
-	if doc.StatusCode != http.StatusOK || !isM3UContent(doc.Body) {
-		cache[candidateURL] = ""
-		return "", false
-	}
-	if !c.shouldVisitURL(doc.FinalURL) {
+	if doc.StatusCode != http.StatusOK || !utils.IsM3UContent(doc.Body) {
 		cache[candidateURL] = ""
 		return "", false
 	}
@@ -673,10 +671,6 @@ func readBody(r io.Reader, limit int64) ([]byte, error) {
 	return append([]byte(nil), data...), nil
 }
 
-func isM3UContent(body []byte) bool {
-	return strings.HasPrefix(strings.TrimSpace(string(body)), "#EXTM3U")
-}
-
 func extractSitemapLocs(body []byte) ([]string, error) {
 	decoder := xml.NewDecoder(bytes.NewReader(body))
 	locs := make([]string, 0, 32)
@@ -739,6 +733,10 @@ func extractEmbeddedPlaylistURLs(baseURL string, raw string) []string {
 			html.UnescapeString(value),
 			strings.ReplaceAll(value, `\/`, `/`),
 			strings.ReplaceAll(html.UnescapeString(value), `\/`, `/`),
+			strings.ReplaceAll(value, `\u002F`, `/`),
+			strings.ReplaceAll(value, `\x2F`, `/`),
+			strings.ReplaceAll(html.UnescapeString(value), `\u002F`, `/`),
+			strings.ReplaceAll(html.UnescapeString(value), `\x2F`, `/`),
 		}
 		for _, variant := range variants {
 			lower := strings.ToLower(variant)
@@ -846,4 +844,40 @@ func dedupe(values []string) []string {
 		}
 	}
 	return out
+}
+
+// DiscoveredSource represents a discovered M3U/M3U8 playlist
+type DiscoveredSource struct {
+	Index     string `json:"index"`
+	URL       string `json:"url"`
+	JobID     string `json:"job_id"`
+	JobName   string `json:"job_name"`
+	Enabled   bool   `json:"enabled"`
+}
+
+// GetDiscoveredSources returns all discovered playlist sources
+func (m *Manager) GetDiscoveredSources() []DiscoveredSource {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var discovered []DiscoveredSource
+	jobsByID := make(map[string]Job)
+	for _, job := range m.jobs {
+		jobsByID[job.ID] = job
+	}
+
+	for jobID, sources := range m.sourcesByJob {
+		job := jobsByID[jobID]
+		for _, source := range sources {
+			discovered = append(discovered, DiscoveredSource{
+				Index:   source.Index,
+				URL:     source.URL,
+				JobID:   jobID,
+				JobName: job.Name,
+				Enabled: job.Enabled,
+			})
+		}
+	}
+
+	return discovered
 }

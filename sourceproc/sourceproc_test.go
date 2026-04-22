@@ -295,6 +295,37 @@ func TestConcurrentAccess(t *testing.T) {
 	}
 }
 
+func TestHandleRemoteURLAcceptsBOMPrefixedM3U(t *testing.T) {
+	expectedM3U := "\ufeff#EXTM3U\n#EXTINF:-1,Test\nhttp://example.com/stream.ts\n"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, err := w.Write([]byte(expectedM3U))
+		require.NoError(t, err)
+	}))
+	defer server.Close()
+
+	result := &SourceDownloaderResult{
+		Index: "TEST",
+		Lines: make(chan *LineDetails, 10),
+		Error: make(chan error, 1),
+	}
+
+	handleRemoteURL(server.URL, result.Index, result)
+	close(result.Lines)
+	close(result.Error)
+
+	var lines []string
+	for line := range result.Lines {
+		lines = append(lines, line.Content)
+	}
+	for err := range result.Error {
+		require.NoError(t, err)
+	}
+
+	assert.Contains(t, strings.Join(lines, "\n"), "#EXTM3U")
+	assert.Contains(t, strings.Join(lines, "\n"), "http://example.com/stream.ts")
+}
+
 func TestSortingVariations(t *testing.T) {
 	sortingTests := []struct {
 		name      string
@@ -608,4 +639,3 @@ func TestSortingManager_MergesAttributesForDuplicateChannelBeforeFlush(t *testin
 	assert.Equal(t, "discovery.2", entries[0].TvgID, "Merged channel should retain attributes contributed by later duplicates")
 	assert.Equal(t, "Documentary", entries[0].Group, "Merged channel should keep missing metadata filled from duplicates")
 }
-

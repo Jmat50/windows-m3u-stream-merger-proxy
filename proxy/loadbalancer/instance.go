@@ -2,22 +2,24 @@ package loadbalancer
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
-	"windows-m3u-stream-merger-proxy/logger"
-	"windows-m3u-stream-merger-proxy/proxy"
-	"windows-m3u-stream-merger-proxy/sourceproc"
-	"windows-m3u-stream-merger-proxy/store"
-	"windows-m3u-stream-merger-proxy/utils"
+	"net"
 	"net/http"
+	"os"
 	"path"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"windows-m3u-stream-merger-proxy/logger"
+	"windows-m3u-stream-merger-proxy/proxy"
+	"windows-m3u-stream-merger-proxy/sourceproc"
+	"windows-m3u-stream-merger-proxy/store"
+	"windows-m3u-stream-merger-proxy/utils"
 
 	"github.com/puzpuzpuz/xsync/v3"
 )
@@ -444,7 +446,13 @@ func (instance *LoadBalancerInstance) tryStreamUrls(
 
 			// Handle file:// URLs specially
 			if strings.HasPrefix(url, "file://") {
-				filePath := strings.TrimPrefix(url, "file://")
+				filePath, err := utils.FileURLToPath(url)
+				if err != nil {
+					instance.logger.Errorf("Invalid local file URL %s: %s", url, err.Error())
+					instance.markTested(streamId, candidateId)
+					resultCh <- &streamTestResult{err: err}
+					return
+				}
 				file, err := os.Open(filePath)
 				if err != nil {
 					instance.logger.Errorf("Error opening local file %s: %s", filePath, err.Error())
@@ -491,7 +499,11 @@ func (instance *LoadBalancerInstance) tryStreamUrls(
 				// Do the HTTP request for non-file URLs.
 				resp, err = instance.healthClient.Do(newReq)
 				if err != nil {
-					instance.logger.Errorf("Error fetching stream: %s", err.Error())
+					if isRetryableStreamError(err) {
+						instance.logger.Debugf("Temporary stream fetch error: %s", err.Error())
+					} else {
+						instance.logger.Errorf("Error fetching stream: %s", err.Error())
+					}
 					instance.markTested(streamId, candidateId)
 					resultCh <- &streamTestResult{err: err}
 					return
@@ -556,6 +568,23 @@ func (instance *LoadBalancerInstance) tryStreamUrls(
 	return nil, fmt.Errorf("all urls failed")
 }
 
+func isRetryableStreamError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		if netErr.Timeout() || netErr.Temporary() {
+			return true
+		}
+	}
+	lowerErr := strings.ToLower(err.Error())
+	if strings.Contains(lowerErr, "lookup") || strings.Contains(lowerErr, "temporary") || strings.Contains(lowerErr, "timeout") {
+		return true
+	}
+	return false
+}
+
 func (instance *LoadBalancerInstance) markTested(streamId string, id string) {
 	instance.testedIndexes.Compute(streamId, func(val []string, _ bool) (newValue []string, delete bool) {
 		val = append(val, id)
@@ -566,4 +595,3 @@ func (instance *LoadBalancerInstance) markTested(streamId string, id string) {
 func (instance *LoadBalancerInstance) clearTested(streamId string) {
 	instance.testedIndexes.Delete(streamId)
 }
-

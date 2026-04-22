@@ -110,3 +110,8 @@ func (instance *Updater) UpdateSources(ctx context.Context) {
 		}
 	}
 }
+
+// GetDiscoveryManager returns the discovery manager instance
+func (instance *Updater) GetDiscoveryManager() *discovery.Manager {
+	return instance.discovery
+}

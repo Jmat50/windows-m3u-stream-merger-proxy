@@ -37,6 +37,7 @@ APP_STATE_DIR = Path(os.getenv("LOCALAPPDATA", str(Path.home()))) / "WindowsM3US
 SETTINGS_FILE = APP_STATE_DIR / "settings.json"
 APP_LOG_FILE = APP_STATE_DIR / "app.log"
 APP_ERROR_LOG_FILE = APP_STATE_DIR / "error-detail.log"
+APP_ERROR_REPORT_FILE = APP_STATE_DIR / "error-report.html"
 RUNTIME_DIR = APP_STATE_DIR / "runtime"
 DATA_DIR = APP_STATE_DIR / "data"
 TEMP_DIR = APP_STATE_DIR / "temp"
@@ -63,6 +64,7 @@ DEFAULT_SETTINGS = {
     "channel_source_rules": [],
     "channel_merge_rules": [],
     "web_discovery_jobs": [],
+    "discovered_channels_config": [],
 }
 
 ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
@@ -292,13 +294,12 @@ class DesktopApp(tk.Tk):
         self.last_server_line: str | None = None
         self.stop_requested_by_user = False
         self.recent_log_lines: deque[str] = deque(maxlen=250)
-        self.error_log_window: tk.Toplevel | None = None
-        self.error_log_text_widget: tk.Text | None = None
         self.include_title_filters: list[str] = []
         self.exclude_title_filters: list[str] = []
         self.channel_source_rules: list[dict[str, object]] = []
         self.channel_merge_rules: list[dict[str, str]] = []
         self.web_discovery_jobs: list[dict[str, object]] = []
+        self.discovered_channels_config: list[dict[str, object]] = []
         self.sources_items: list[dict[str, object]] = []
         self.source_action_icons: dict[str, tk.PhotoImage] = {}
         self.channel_source_reorder_callback: Callable[[], None] | None = None
@@ -731,6 +732,9 @@ class DesktopApp(tk.Tk):
 
         self.sources_items = self._normalize_sources(settings.get("sources", []))
         self.web_discovery_jobs = self._normalize_web_discovery_jobs(settings.get("web_discovery_jobs"))
+        self.discovered_channels_config = self._normalize_discovered_channels_config(
+            settings.get("discovered_channels_config", [])
+        )
         self._ensure_web_discovery_job_sources()
         self._refresh_sources_tree()
         self._clear_source_editor()
@@ -749,16 +753,12 @@ class DesktopApp(tk.Tk):
                 continue
             if start_url in existing_urls:
                 continue
-            parsed = urllib.parse.urlparse(start_url)
-            path = parsed.path if parsed.scheme in {"http", "https", "file"} else start_url
-            if not Path(path).suffix.lower() in {".m3u", ".m3u8"}:
-                continue
 
             raw_name = str(job.get("name", "")).strip() or f"Web Discovery {len(self.sources_items) + 1}"
             formatted_name = (
                 raw_name
-                if raw_name.lower().endswith(" (web discovery)")
-                else f"{raw_name} (Web Discovery)"
+                if raw_name.lower().endswith(" (web discovery placeholder)")
+                else f"{raw_name} (Web Discovery placeholder)"
             )
             self.sources_items.append(
                 {
@@ -766,13 +766,14 @@ class DesktopApp(tk.Tk):
                     "url": start_url,
                     "concurrency": str(job.get("source_concurrency", 1)) or "1",
                     "contains_vod": True,
+                    "_web_discovery_job": True,
                 }
             )
             existing_urls.add(start_url)
             changed = True
 
         if changed:
-            self._set_last_event("Added discovered playlist source(s) from web discovery jobs.")
+            self._set_last_event("Added a placeholder source for each web discovery job.")
 
     def _reset_settings_to_defaults_clicked(self) -> None:
         self._apply_settings_to_ui(DEFAULT_SETTINGS)
@@ -859,14 +860,15 @@ class DesktopApp(tk.Tk):
                 contains_vod = bool(item.get("contains_vod", True))
                 if not concurrency.isdigit() or int(concurrency) < 1:
                     concurrency = "1"
-                output.append(
-                    {
-                        "name": name,
-                        "url": url,
-                        "concurrency": concurrency,
-                        "contains_vod": contains_vod,
-                    }
-                )
+                source = {
+                    "name": name,
+                    "url": url,
+                    "concurrency": concurrency,
+                    "contains_vod": contains_vod,
+                }
+                if item.get("_web_discovery_job"):
+                    source["_web_discovery_job"] = True
+                output.append(source)
                 continue
 
             if isinstance(item, str):
@@ -919,6 +921,29 @@ class DesktopApp(tk.Tk):
                     "include_subdomains": bool(item.get("include_subdomains", False)),
                     "follow_robots": bool(item.get("follow_robots", True)),
                     "source_concurrency": _positive_int(item.get("source_concurrency", 1), 1),
+                    "enabled": bool(item.get("enabled", True)),
+                }
+            )
+
+        return output
+
+    def _normalize_discovered_channels_config(self, value: object) -> list[dict[str, object]]:
+        if not isinstance(value, list):
+            return []
+
+        output: list[dict[str, object]] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+
+            index = str(item.get("index", "")).strip()
+            if not index:
+                continue
+
+            output.append(
+                {
+                    "index": index,
+                    "name": str(item.get("name", "")).strip(),
                     "enabled": bool(item.get("enabled", True)),
                 }
             )
@@ -1190,6 +1215,7 @@ class DesktopApp(tk.Tk):
             columns=("name", "start_url", "interval", "mode", "status"),
             show="headings",
             selectmode="browse",
+            takefocus=True,
             height=14,
         )
         jobs_tree.heading("name", text="Job Name")
@@ -1442,11 +1468,15 @@ class DesktopApp(tk.Tk):
             refresh_tree(select_index=min(index, len(jobs) - 1) if jobs else None)
             self._set_last_event(f"Removed discovery job '{removed.get('name', 'Web Discovery')}'.")
 
+        def manage_discovered_channels() -> None:
+            self._open_manage_discovered_channels_popup()
+
         actions = ttk.Frame(footer)
         actions.pack(side=tk.LEFT)
         ttk.Button(actions, text="Add Job", command=add_job).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(actions, text="Edit Job", command=edit_job).pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Button(actions, text="Remove Job", command=remove_job).pack(side=tk.LEFT)
+        ttk.Button(actions, text="Remove Job", command=remove_job).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(actions, text="Manage Discovered Channels", command=manage_discovered_channels).pack(side=tk.LEFT)
 
         def save_popup_settings() -> None:
             self.web_discovery_jobs = self._normalize_web_discovery_jobs(jobs)
@@ -1468,9 +1498,30 @@ class DesktopApp(tk.Tk):
         ttk.Button(footer_buttons, text="Cancel", command=popup.destroy).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(footer_buttons, text="Save", command=save_popup_settings).pack(side=tk.LEFT)
 
-        jobs_tree.bind("<<TreeviewSelect>>", lambda event: refresh_tree())
+        def on_tree_select(event: tk.Event) -> None:
+            index = selected_index()
+            if index is None:
+                summary_var.set("No discovery job selected. Add one to start scanning a site for M3U links.")
+                return
+            summary_var.set(describe_job(jobs[index]))
+
+        def on_tree_key(event: tk.Event) -> None:
+            # Handle keyboard navigation (Up/Down arrows, Enter, etc.)
+            if event.keysym in ("Up", "Down", "Home", "End"):
+                # Selection will be updated via <<TreeviewSelect>> event
+                pass
+            elif event.keysym == "Return":
+                edit_job()
+            elif event.keysym == "Delete":
+                remove_job()
+
+        jobs_tree.bind("<<TreeviewSelect>>", on_tree_select)
         jobs_tree.bind("<Double-1>", lambda event: edit_job())
+        jobs_tree.bind("<Key>", on_tree_key)
         refresh_tree(select_index=0 if jobs else None)
+
+        # Ensure the treeview gets focus after the popup is fully set up
+        popup.after(100, lambda: jobs_tree.focus_set())
 
     def _normalize_channel_source_rules(self, value: object) -> list[dict[str, object]]:
         if not isinstance(value, list):
@@ -2663,6 +2714,257 @@ class DesktopApp(tk.Tk):
 
         refresh_channels()
 
+    def _open_manage_discovered_channels_popup(self) -> None:
+        popup = tk.Toplevel(self)
+        popup.title("Manage Discovered Channels")
+        popup.geometry("900x600")
+        popup.minsize(800, 500)
+        popup.transient(self)
+        popup.grab_set()
+
+        root = ttk.Frame(popup, padding=12)
+        root.pack(fill=tk.BOTH, expand=True)
+        root.columnconfigure(0, weight=1)
+        root.rowconfigure(1, weight=1)
+
+        ttk.Label(
+            root,
+            text="Manage discovered M3U/M3U8 playlists from web discovery jobs. Edit names, and choose which channels appear in the final playlist.",
+            wraplength=860,
+            justify=tk.LEFT,
+        ).grid(row=0, column=0, sticky="ew", pady=(0, 12))
+
+        # Create a frame for the treeview
+        tree_frame = ttk.Frame(root)
+        tree_frame.grid(row=1, column=0, sticky="nsew")
+        tree_frame.columnconfigure(0, weight=1)
+        tree_frame.rowconfigure(0, weight=1)
+
+        # Create treeview with columns: enabled, name, URL, job name
+        channels_tree = ttk.Treeview(
+            tree_frame,
+            columns=("enabled", "name", "url", "job_name"),
+            show="headings",
+            selectmode="browse",
+            takefocus=True,
+            height=18,
+        )
+        channels_tree.heading("enabled", text="Include")
+        channels_tree.heading("name", text="Channel Name")
+        channels_tree.heading("url", text="Playlist URL")
+        channels_tree.heading("job_name", text="Job")
+        channels_tree.column("enabled", width=60, anchor=tk.CENTER, stretch=False)
+        channels_tree.column("name", width=200, anchor=tk.W, stretch=True)
+        channels_tree.column("url", width=380, anchor=tk.W, stretch=True)
+        channels_tree.column("job_name", width=140, anchor=tk.W, stretch=False)
+        channels_tree.grid(row=0, column=0, sticky="nsew")
+
+        scroll_y = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=channels_tree.yview)
+        scroll_y.grid(row=0, column=1, sticky="ns")
+        channels_tree.configure(yscrollcommand=scroll_y.set)
+
+        # Status label
+        status_var = tk.StringVar(value="Loading discovered channels...")
+        ttk.Label(root, textvariable=status_var, foreground="#4f4f4f").grid(
+            row=2, column=0, sticky="w", pady=(10, 0)
+        )
+
+        # Fetch discovered sources from API
+        discovered_sources: list[dict[str, object]] = []
+
+        def fetch_discovered_channels() -> None:
+            nonlocal discovered_sources
+            try:
+                port = self.port_var.get().strip() or "8080"
+                url = f"http://localhost:{port}/api/discovery/sources"
+                with urllib.request.urlopen(url, timeout=5) as response:
+                    data = json.loads(response.read().decode("utf-8"))
+                    if isinstance(data, list):
+                        discovered_sources = data
+                    else:
+                        discovered_sources = []
+            except Exception as exc:  # noqa: BLE001
+                self._append_log(f"[APP] Failed to fetch discovered channels: {exc}")
+                discovered_sources = []
+
+            refresh_tree()
+
+        def refresh_tree() -> None:
+            for item_id in channels_tree.get_children():
+                channels_tree.delete(item_id)
+
+            # Create a map of current config by index
+            config_by_index: dict[str, dict[str, object]] = {}
+            for config in self.discovered_channels_config:
+                index = str(config.get("index", "")).strip()
+                if index:
+                    config_by_index[index] = config
+
+            # Populate tree
+            for source in discovered_sources:
+                index = str(source.get("index", "")).strip()
+                url = str(source.get("url", "")).strip()
+                job_name = str(source.get("job_name", "")).strip()
+
+                # Get custom name from config, or use URL-based default
+                config = config_by_index.get(index, {})
+                custom_name = str(config.get("name", "")).strip()
+                enabled = bool(config.get("enabled", True))
+
+                # If no custom name, use a short name from URL
+                if not custom_name:
+                    try:
+                        from urllib.parse import urlparse
+
+                        parsed = urlparse(url)
+                        custom_name = parsed.hostname or url
+                    except Exception:  # noqa: BLE001
+                        custom_name = url
+
+                enabled_text = "✓" if enabled else ""
+                channels_tree.insert(
+                    "",
+                    tk.END,
+                    iid=index,
+                    values=(enabled_text, custom_name, url, job_name),
+                )
+
+            if not discovered_sources:
+                status_var.set("No discovered channels yet. Run web discovery jobs to discover M3U/M3U8 playlists.")
+            else:
+                status_var.set(f"Found {len(discovered_sources)} discovered channel(s).")
+
+        def on_tree_double_click(event: tk.Event) -> None:
+            selected = channels_tree.selection()
+            if not selected:
+                return
+            index = str(selected[0])
+            column = channels_tree.identify_column(event.x)
+
+            if column == "#1":  # enabled column
+                toggle_channel_enabled(index)
+            elif column == "#2":  # name column
+                edit_channel_name(index)
+
+        def toggle_channel_enabled(index: str) -> None:
+            # Find config for this index
+            config = None
+            config_index = None
+            for idx, cfg in enumerate(self.discovered_channels_config):
+                if str(cfg.get("index", "")).strip() == index:
+                    config = cfg
+                    config_index = idx
+                    break
+
+            # If no config exists, create one
+            if config is None:
+                config = {"index": index, "name": "", "enabled": True}
+                self.discovered_channels_config.append(config)
+                config_index = len(self.discovered_channels_config) - 1
+
+            # Toggle enabled
+            config["enabled"] = not bool(config.get("enabled", True))
+            refresh_tree()
+
+        def edit_channel_name(index: str) -> None:
+            editor = tk.Toplevel(popup)
+            editor.title("Edit Channel Name")
+            editor.geometry("400x150")
+            editor.transient(popup)
+            editor.grab_set()
+
+            # Find current source and config
+            current_source = None
+            for source in discovered_sources:
+                if str(source.get("index", "")).strip() == index:
+                    current_source = source
+                    break
+
+            if current_source is None:
+                editor.destroy()
+                return
+
+            url = str(current_source.get("url", "")).strip()
+            job_name = str(current_source.get("job_name", "")).strip()
+
+            # Find config
+            config = None
+            config_index = None
+            for idx, cfg in enumerate(self.discovered_channels_config):
+                if str(cfg.get("index", "")).strip() == index:
+                    config = cfg
+                    config_index = idx
+                    break
+
+            if config is None:
+                config = {"index": index, "name": "", "enabled": True}
+
+            root_frame = ttk.Frame(editor, padding=12)
+            root_frame.pack(fill=tk.BOTH, expand=True)
+
+            ttk.Label(root_frame, text=f"URL: {url}", wraplength=360, justify=tk.LEFT).grid(
+                row=0, column=0, columnspan=2, sticky="ew", pady=(0, 8)
+            )
+            ttk.Label(root_frame, text=f"Job: {job_name}", wraplength=360, justify=tk.LEFT).grid(
+                row=1, column=0, columnspan=2, sticky="ew", pady=(0, 12)
+            )
+
+            ttk.Label(root_frame, text="Channel Name:").grid(row=2, column=0, sticky="w")
+            name_var = tk.StringVar(value=str(config.get("name", "")).strip())
+            name_entry = ttk.Entry(root_frame, textvariable=name_var, width=40)
+            name_entry.grid(row=2, column=1, sticky="ew", padx=(8, 0))
+
+            def save_changes() -> None:
+                new_name = name_var.get().strip()
+                if config_index is not None:
+                    self.discovered_channels_config[config_index]["name"] = new_name
+                else:
+                    config["name"] = new_name
+                    self.discovered_channels_config.append(config)
+                refresh_tree()
+                editor.destroy()
+
+            button_frame = ttk.Frame(root_frame)
+            button_frame.grid(row=3, column=0, columnspan=2, sticky="e", pady=(12, 0))
+            ttk.Button(button_frame, text="Cancel", command=editor.destroy).pack(side=tk.LEFT, padx=(0, 8))
+            ttk.Button(button_frame, text="Save", command=save_changes).pack(side=tk.LEFT)
+
+            name_entry.focus_set()
+            name_entry.selection_range(0, tk.END)
+
+        # Footer with buttons
+        footer = ttk.Frame(root)
+        footer.grid(row=3, column=0, sticky="ew", pady=(14, 0))
+
+        actions = ttk.Frame(footer)
+        actions.pack(side=tk.LEFT)
+        ttk.Button(actions, text="Edit Name", command=lambda: edit_channel_name(channels_tree.selection()[0]) if channels_tree.selection() else None).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(actions, text="Toggle Include", command=lambda: toggle_channel_enabled(channels_tree.selection()[0]) if channels_tree.selection() else None).pack(side=tk.LEFT)
+
+        def save_popup_settings() -> None:
+            try:
+                settings = self._collect_settings()
+                self._persist_settings(settings, sync_start_on_boot=False, show_dialogs=False, log_event=False)
+            except Exception as exc:  # noqa: BLE001
+                self._show_error("Invalid Settings", str(exc))
+                return
+
+            self._append_log("[APP] Discovered channels configuration saved.")
+            popup.destroy()
+
+        footer_buttons = ttk.Frame(footer)
+        footer_buttons.pack(side=tk.RIGHT)
+        ttk.Button(footer_buttons, text="Cancel", command=popup.destroy).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(footer_buttons, text="Save", command=save_popup_settings).pack(side=tk.LEFT)
+
+        # Bind double-click to toggle and edit
+        channels_tree.bind("<Double-Button-1>", on_tree_double_click)
+        channels_tree.bind("<space>", lambda _: toggle_channel_enabled(channels_tree.selection()[0]) if channels_tree.selection() else None)
+
+        # Fetch discovered channels in background
+        popup.after(100, fetch_discovered_channels)
+        popup.after(100, lambda: channels_tree.focus_set())
+
     def _collect_settings(self) -> dict:
         port = self.port_var.get().strip()
         if not port.isdigit():
@@ -2680,6 +2982,9 @@ class DesktopApp(tk.Tk):
 
         sources: list[dict[str, object]] = []
         for index, source in enumerate(self.sources_items, start=1):
+            if source.get("_web_discovery_job"):
+                continue
+
             url = str(source.get("url", "")).strip()
             if not url:
                 continue
@@ -2718,6 +3023,7 @@ class DesktopApp(tk.Tk):
             "channel_source_rules": list(self.channel_source_rules),
             "channel_merge_rules": list(self.channel_merge_rules),
             "web_discovery_jobs": [dict(job) for job in self.web_discovery_jobs],
+            "discovered_channels_config": [dict(config) for config in self.discovered_channels_config],
         }
 
     def _persist_settings(
@@ -3300,6 +3606,7 @@ class DesktopApp(tk.Tk):
         env["SHARED_BUFFER"] = _to_bool_env(settings.get("shared_buffer", DEFAULT_SETTINGS["shared_buffer"]))
         env["DATA_PATH"] = str(DATA_DIR)
         env["TEMP_PATH"] = str(TEMP_DIR)
+        env["ERROR_REPORT_PATH"] = str(APP_ERROR_REPORT_FILE)
 
         for index, source in enumerate(settings["sources"], start=1):
             source_url = str(source.get("url", "")).strip()
@@ -3520,103 +3827,19 @@ class DesktopApp(tk.Tk):
         else:
             messagebox.showerror(title, message, parent=parent)
 
-    def _read_detailed_error_log_text(self) -> str:
-        sections: list[str] = []
-        if APP_LOG_FILE.exists():
-            try:
-                sections.append("=== EVENT LOG ===")
-                sections.append(APP_LOG_FILE.read_text(encoding="utf-8"))
-            except OSError as exc:
-                sections.append(f"Could not read {APP_LOG_FILE}: {exc}")
-        else:
-            sections.append("=== EVENT LOG ===")
-            sections.append("No event log file found yet.")
-
-        sections.append("")
-        sections.append("=== DETAILED ERROR REPORTS ===")
-        if APP_ERROR_LOG_FILE.exists():
-            try:
-                sections.append(APP_ERROR_LOG_FILE.read_text(encoding="utf-8"))
-            except OSError as exc:
-                sections.append(f"Could not read {APP_ERROR_LOG_FILE}: {exc}")
-        else:
-            sections.append("No detailed error reports found yet.")
-
-        return "\n".join(sections)
-
-    def _copy_error_log_selection(self) -> None:
-        widget = self.error_log_text_widget
-        if widget is None or not widget.winfo_exists():
-            return
-        try:
-            selected = widget.get("sel.first", "sel.last")
-        except tk.TclError:
-            return
-        self.clipboard_clear()
-        self.clipboard_append(selected)
-
-    def _refresh_error_log_view(self) -> None:
-        widget = self.error_log_text_widget
-        if widget is None or not widget.winfo_exists():
-            return
-        text = self._read_detailed_error_log_text()
-        widget.configure(state=tk.NORMAL)
-        widget.delete("1.0", tk.END)
-        widget.insert(tk.END, text)
-        widget.see(tk.END)
-        widget.configure(state=tk.DISABLED)
-
     def _open_error_log_clicked(self) -> None:
-        if self.error_log_window is not None and self.error_log_window.winfo_exists():
-            self._refresh_error_log_view()
-            self.error_log_window.deiconify()
-            self.error_log_window.lift()
-            self.error_log_window.focus_force()
-            return
+        if APP_ERROR_REPORT_FILE.exists():
+            try:
+                os.startfile(str(APP_ERROR_REPORT_FILE))
+                return
+            except OSError as exc:
+                self._show_error("Error Log", f"Could not open error report file:\n{exc}")
+                return
 
-        popup = tk.Toplevel(self)
-        popup.title("Detailed Error Log")
-        popup.geometry("1100x720")
-        popup.minsize(900, 560)
-        popup.transient(self)
-
-        root = ttk.Frame(popup, padding=10)
-        root.pack(fill=tk.BOTH, expand=True)
-        root.columnconfigure(0, weight=1)
-        root.rowconfigure(0, weight=1)
-
-        text_widget = tk.Text(root, wrap=tk.NONE, state=tk.DISABLED)
-        text_widget.grid(row=0, column=0, sticky="nsew")
-        scroll_y = ttk.Scrollbar(root, orient=tk.VERTICAL, command=text_widget.yview)
-        scroll_y.grid(row=0, column=1, sticky="ns")
-        scroll_x = ttk.Scrollbar(root, orient=tk.HORIZONTAL, command=text_widget.xview)
-        scroll_x.grid(row=1, column=0, sticky="ew")
-        text_widget.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
-
-        actions = ttk.Frame(root)
-        actions.grid(row=2, column=0, columnspan=2, sticky="e", pady=(8, 0))
-        ttk.Button(actions, text="Refresh", command=self._refresh_error_log_view).pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Button(actions, text="Copy Selected", command=self._copy_error_log_selection).pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Button(actions, text="Open Log Folder", command=self._open_data_folder_clicked).pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Button(actions, text="Close", command=popup.destroy).pack(side=tk.LEFT)
-
-        def copy_shortcut(_event: object) -> str:
-            self._copy_error_log_selection()
-            return "break"
-
-        text_widget.bind("<Control-c>", copy_shortcut)
-        text_widget.bind("<Button-3>", lambda _event: "break")
-
-        def on_close_popup() -> None:
-            self.error_log_window = None
-            self.error_log_text_widget = None
-            popup.destroy()
-
-        popup.protocol("WM_DELETE_WINDOW", on_close_popup)
-
-        self.error_log_window = popup
-        self.error_log_text_widget = text_widget
-        self._refresh_error_log_view()
+        self._show_error(
+            "Error Log",
+            "No error report file was found yet. The server will generate it when an error occurs.",
+        )
 
     def _write_persistent_log(self, message: str) -> None:
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")

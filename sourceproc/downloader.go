@@ -55,7 +55,7 @@ func streamDownloadM3USources() chan *SourceDownloaderResult {
 					}
 
 					if strings.HasPrefix(m3uURL, "file://") {
-						handleLocalFile(strings.TrimPrefix(m3uURL, "file://"), result)
+						handleLocalFile(m3uURL, result)
 						return
 					}
 
@@ -72,7 +72,15 @@ func streamDownloadM3USources() chan *SourceDownloaderResult {
 	return resultChan
 }
 
-func handleLocalFile(localPath string, result *SourceDownloaderResult) {
+func handleLocalFile(pathOrURL string, result *SourceDownloaderResult) {
+	localPath := pathOrURL
+	if strings.HasPrefix(pathOrURL, "file://") {
+		resolvedPath, err := utils.FileURLToPath(pathOrURL)
+		if err == nil {
+			localPath = resolvedPath
+		}
+	}
+
 	file, err := os.Open(localPath)
 	if err != nil {
 		result.Error <- fmt.Errorf("error opening local file: %v", err)
@@ -92,7 +100,11 @@ func handleRemoteURL(m3uURL, idx string, result *SourceDownloaderResult) {
 		return
 	}
 
-	fallbackFile, _ := os.Open(finalPath)
+	fallbackFile, fallbackErr := os.Open(finalPath)
+	if fallbackErr != nil && !os.IsNotExist(fallbackErr) {
+		logger.Default.Warnf("Unable to open existing fallback file for index %s: %v", idx, fallbackErr)
+		fallbackFile = nil
+	}
 	defer func() {
 		if fallbackFile != nil {
 			fallbackFile.Close()
@@ -116,15 +128,32 @@ func handleRemoteURL(m3uURL, idx string, result *SourceDownloaderResult) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		logger.Default.Warnf("HTTP status %d for index %s", resp.StatusCode, idx)
+		if fallbackFile != nil {
+			logger.Default.Warnf("HTTP status %d for index %s. Falling back to existing file: %s", resp.StatusCode, idx, finalPath)
+		} else {
+			logger.Default.Warnf("HTTP status %d for index %s and no fallback exists", resp.StatusCode, idx)
+		}
 		useFallback(fmt.Errorf("HTTP status %d and no existing file", resp.StatusCode))
 		return
 	}
 
 	bufReader := bufio.NewReader(resp.Body)
-	peekBytes, err := bufReader.Peek(7)
-	if err != nil || !strings.HasPrefix(string(peekBytes), "#EXTM3U") {
-		logger.Default.Warnf("Invalid M3U response for index %s. Falling back to existing file: %s", idx, finalPath)
+	isM3U, err := isM3UResponse(bufReader)
+	if err != nil {
+		if fallbackFile != nil {
+			logger.Default.Warnf("Invalid M3U response for index %s. Falling back to existing file: %s", idx, finalPath)
+		} else {
+			logger.Default.Warnf("Invalid M3U response for index %s and no fallback exists: %v", idx, err)
+		}
+		useFallback(fmt.Errorf("invalid M3U response and no fallback: %v", err))
+		return
+	}
+	if !isM3U {
+		if fallbackFile != nil {
+			logger.Default.Warnf("Invalid M3U response for index %s. Falling back to existing file: %s", idx, finalPath)
+		} else {
+			logger.Default.Warnf("Invalid M3U response for index %s and no fallback exists", idx)
+		}
 		useFallback(fmt.Errorf("invalid M3U response and no fallback"))
 		return
 	}
@@ -144,6 +173,14 @@ func handleRemoteURL(m3uURL, idx string, result *SourceDownloaderResult) {
 
 	reader := io.TeeReader(bufReader, newFile)
 	scanAndStream(reader, result)
+}
+
+func isM3UResponse(r *bufio.Reader) (bool, error) {
+	peekBytes, err := r.Peek(1024)
+	if err != nil && err != bufio.ErrBufferFull && err != io.EOF {
+		return false, err
+	}
+	return utils.IsM3UContent(peekBytes), nil
 }
 
 func scanAndStream(r io.Reader, result *SourceDownloaderResult) {

@@ -32,10 +32,12 @@ func main() {
 	passthroughHandler := handlers.NewPassthroughHTTPHandler(logger.Default)
 
 	logger.Default.Log("Starting updater...")
-	_, err := updater.Initialize(ctx, logger.Default, m3uHandler)
+	updaterInstance, err := updater.Initialize(ctx, logger.Default, m3uHandler)
 	if err != nil {
 		failStartup("Error initializing updater: %v", err)
 	}
+
+	discoveryHandler := handlers.NewDiscoveryHTTPHandler(logger.Default, updaterInstance.GetDiscoveryManager())
 
 	// manually set time zone
 	if tz := os.Getenv("TZ"); tz != "" {
@@ -51,6 +53,9 @@ func main() {
 	// HTTP handlers
 	http.HandleFunc("/playlist.m3u", func(w http.ResponseWriter, r *http.Request) {
 		m3uHandler.ServeHTTP(w, r)
+	})
+	http.HandleFunc("/api/discovery/sources", func(w http.ResponseWriter, r *http.Request) {
+		discoveryHandler.ServeHTTP(w, r)
 	})
 	http.HandleFunc("/p/", func(w http.ResponseWriter, r *http.Request) {
 		streamHandler.ServeHTTP(w, r)

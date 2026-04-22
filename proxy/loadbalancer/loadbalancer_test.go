@@ -5,9 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"windows-m3u-stream-merger-proxy/logger"
-	"windows-m3u-stream-merger-proxy/sourceproc"
-	"windows-m3u-stream-merger-proxy/store"
+	"net"
 	"net/http"
 	"os"
 	"sort"
@@ -15,6 +13,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"windows-m3u-stream-merger-proxy/logger"
+	"windows-m3u-stream-merger-proxy/sourceproc"
+	"windows-m3u-stream-merger-proxy/store"
 
 	"github.com/puzpuzpuz/xsync/v3"
 )
@@ -283,6 +284,50 @@ func TestLoadBalancer(t *testing.T) {
 
 			if result.SubIndex != tt.expectedSubIdx {
 				t.Errorf("LoadBalancer() got SubIndex = %v, want %v", result.SubIndex, tt.expectedSubIdx)
+			}
+		})
+	}
+}
+
+func TestIsRetryableStreamError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "temporary DNS error",
+			err: &net.DNSError{
+				IsTemporary: true,
+				Err:         "temporary lookup failure",
+			},
+			want: true,
+		},
+		{
+			name: "timeout network error",
+			err: &net.DNSError{
+				IsTimeout: true,
+				Err:       "timeout",
+			},
+			want: true,
+		},
+		{
+			name: "simple lookup error string",
+			err:  errors.New("dial tcp: lookup cdn.klowdtv.net: no such host"),
+			want: true,
+		},
+		{
+			name: "non-temporary error",
+			err:  errors.New("connection refused"),
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isRetryableStreamError(tt.err)
+			if got != tt.want {
+				t.Fatalf("isRetryableStreamError(%v) = %v, want %v", tt.err, got, tt.want)
 			}
 		})
 	}
@@ -784,4 +829,3 @@ func TestLoadBalancerConcurrencyPriority(t *testing.T) {
 		})
 	}
 }
-

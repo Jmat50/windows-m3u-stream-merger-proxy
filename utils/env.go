@@ -27,7 +27,7 @@ func GetEnv(env string) string {
 	case "HTTP_ACCEPT":
 		accept, exists := os.LookupEnv("HTTP_ACCEPT")
 		if !exists {
-			accept = "video/MP2T, */*"
+			accept = "application/vnd.apple.mpegurl,application/x-mpegURL,video/MP2T,*/*"
 		}
 		return accept
 	default:

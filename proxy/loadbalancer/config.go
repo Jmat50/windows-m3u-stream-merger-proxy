@@ -13,7 +13,7 @@ type LBConfig struct {
 
 func NewDefaultLBConfig() *LBConfig {
 	finalMaxRetries := 5
-	finalRetryWait := 0
+	finalRetryWait := 1
 	finalBufferChunk := 1024 * 1024
 
 	maxRetries, ok := os.LookupEnv("MAX_RETRIES")
