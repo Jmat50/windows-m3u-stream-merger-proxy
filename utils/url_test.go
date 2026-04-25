@@ -53,7 +53,7 @@ func TestIsProbablyMedia_WithMediaResponse(t *testing.T) {
 
 func TestFileURLToPath_ValidFileURL(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		expected := filepath.Join("C:", "Temp", "playlist.m3u8")
+		expected := filepath.FromSlash("C:/Temp/playlist.m3u8")
 		input := "file:///C:/Temp/playlist.m3u8"
 		path, err := FileURLToPath(input)
 		if err != nil {
@@ -81,7 +81,7 @@ func TestFileURLToPath_FallbackWindowsLegacyURL(t *testing.T) {
 	}
 
 	input := "file://C:/Temp/playlist.m3u8"
-	expected := filepath.Join("C:", "Temp", "playlist.m3u8")
+	expected := filepath.FromSlash("C:/Temp/playlist.m3u8")
 	path, err := FileURLToPath(input)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

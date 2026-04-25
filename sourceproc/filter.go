@@ -3,15 +3,15 @@ package sourceproc
 import (
 	"encoding/base64"
 	"fmt"
-	"windows-m3u-stream-merger-proxy/config"
-	"windows-m3u-stream-merger-proxy/logger"
-	"windows-m3u-stream-merger-proxy/utils"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
 	"unicode"
+	"windows-m3u-stream-merger-proxy/config"
+	"windows-m3u-stream-merger-proxy/logger"
+	"windows-m3u-stream-merger-proxy/utils"
 
 	"github.com/puzpuzpuz/xsync/v3"
 )
@@ -107,7 +107,47 @@ func ParseStreamInfoBySlug(slug string) (*StreamInfo, error) {
 		return nil, fmt.Errorf("errors loading stream URLs: %v", errors)
 	}
 
+	restoreStreamFallbackURL(initInfo)
+
 	return initInfo, nil
+}
+
+func restoreStreamFallbackURL(stream *StreamInfo) {
+	if stream == nil || hasValidStreamURLs(stream) {
+		return
+	}
+
+	sourceIndex := strings.TrimSpace(stream.SourceM3U)
+	sourceURL := strings.TrimSpace(stream.SourceURL)
+	if sourceIndex == "" || sourceURL == "" {
+		return
+	}
+
+	if stream.URLs == nil {
+		stream.URLs = xsync.NewMapOf[string, map[string]string]()
+	}
+
+	stream.URLs.Store(sourceIndex, map[string]string{
+		"fallback": fmt.Sprintf("%d:::%s", stream.SourceIndex, sourceURL),
+	})
+}
+
+func hasValidStreamURLs(stream *StreamInfo) bool {
+	if stream == nil || stream.URLs == nil || stream.URLs.Size() == 0 {
+		return false
+	}
+
+	hasValidURLs := false
+	stream.URLs.Range(func(_ string, innerMap map[string]string) bool {
+		if len(innerMap) == 0 {
+			return true
+		}
+
+		hasValidURLs = true
+		return false
+	})
+
+	return hasValidURLs
 }
 
 func loadStreamURLs(stream *StreamInfo, m3uIndex string) error {
@@ -374,4 +414,3 @@ func allFiltersEmpty() bool {
 	}
 	return true
 }
-

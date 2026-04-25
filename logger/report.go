@@ -2,7 +2,6 @@ package logger
 
 import (
 	"fmt"
-	"html/template"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -24,7 +23,7 @@ type errorReporter struct {
 	mu        sync.Mutex
 	events    []errorEvent
 	maxEvents int
-	htmlPath  string
+	reportPath string
 }
 
 var reporter *errorReporter
@@ -34,13 +33,13 @@ func init() {
 }
 
 func newErrorReporter() *errorReporter {
-	htmlPath := os.Getenv("ERROR_REPORT_PATH")
-	if strings.TrimSpace(htmlPath) == "" {
-		htmlPath = filepath.Join(os.TempDir(), "m3u-stream-merger-proxy-error-report.html")
+	reportPath := os.Getenv("ERROR_REPORT_PATH")
+	if strings.TrimSpace(reportPath) == "" {
+		reportPath = filepath.Join(os.TempDir(), "m3u-stream-merger-proxy-error-report.txt")
 	}
 	return &errorReporter{
 		maxEvents: 50,
-		htmlPath:  htmlPath,
+		reportPath: reportPath,
 	}
 }
 
@@ -62,34 +61,47 @@ func (r *errorReporter) record(level, message string) {
 		r.events = r.events[1:]
 	}
 	r.events = append(r.events, event)
-	_ = r.writeHTML()
+	_ = r.writeText()
 }
 
-func (r *errorReporter) writeHTML() error {
-	data := struct {
-		GeneratedAt string
-		Events      []errorEvent
-	}{
-		GeneratedAt: time.Now().Format(time.RFC3339Nano),
-		Events:      append([]errorEvent(nil), r.events...),
-	}
-
-	tpl, err := template.New("report").Parse(htmlTemplate)
-	if err != nil {
+func (r *errorReporter) writeText() error {
+	if err := os.MkdirAll(filepath.Dir(r.reportPath), 0755); err != nil {
 		return err
 	}
 
-	if err := os.MkdirAll(filepath.Dir(r.htmlPath), 0755); err != nil {
-		return err
-	}
-
-	f, err := os.Create(r.htmlPath)
+	f, err := os.Create(r.reportPath)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 
-	return tpl.Execute(f, data)
+	if _, err := fmt.Fprintf(
+		f,
+		"M3U Stream Merger Proxy Error Report\nGenerated at: %s\nEvent count: %d\n\n",
+		time.Now().Format(time.RFC3339Nano),
+		len(r.events),
+	); err != nil {
+		return err
+	}
+
+	for i, event := range r.events {
+		if _, err := fmt.Fprintf(
+			f,
+			"[%d/%d] %s %s\nMessage: %s\nCaller: %s\nStack:\n%s\n%s\n",
+			i+1,
+			len(r.events),
+			event.Level,
+			event.Timestamp,
+			event.Message,
+			event.Caller,
+			event.Stack,
+			strings.Repeat("-", 80),
+		); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func captureCaller() string {
@@ -110,7 +122,7 @@ func captureCaller() string {
 func SetErrorReportPath(path string) {
 	reporter.mu.Lock()
 	defer reporter.mu.Unlock()
-	reporter.htmlPath = path
+	reporter.reportPath = path
 }
 
 func ResetErrorReport() {
@@ -118,62 +130,3 @@ func ResetErrorReport() {
 	defer reporter.mu.Unlock()
 	reporter.events = nil
 }
-
-const htmlTemplate = `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8" />
-<title>M3U Stream Merger Proxy Error Report</title>
-<style>
-body { font-family: Arial, sans-serif; margin: 0; padding: 16px; background: #f5f7fb; color: #111; }
-header { margin-bottom: 24px; }
-header h1 { margin: 0; font-size: 1.8rem; }
-header p { margin: 4px 0 0; color: #555; }
-.event { background: #fff; border: 1px solid #dce1e8; border-radius: 8px; margin-bottom: 12px; overflow: hidden; }
-.summary { display: flex; align-items: center; justify-content: space-between; padding: 16px; cursor: pointer; }
-.summary:hover { background: #f0f4fb; }
-.summary .left { display: grid; gap: 4px; }
-.summary .level { display: inline-block; padding: 4px 8px; border-radius: 4px; font-weight: 700; letter-spacing: .03em; }
-.level-ERROR { background: #ffe5e5; color: #a00000; }
-.level-WARN { background: #fff4d6; color: #7b5900; }
-.summary .caller { color: #555; font-size: 0.9rem; }
-.details { display: none; padding: 0 16px 16px 16px; border-top: 1px solid #e1e5ec; background: #fafbfc; }
-.details pre { white-space: pre-wrap; word-break: break-word; margin: 0; font-size: 0.9rem; line-height: 1.4; }
-.toggle { background: none; border: none; color: #1f5cff; cursor: pointer; font-size: 0.95rem; }
-</style>
-</head>
-<body>
-<header>
-<h1>M3U Stream Merger Proxy Error Report</h1>
-<p>Last {{len .Events}} logged error events. Generated at {{.GeneratedAt}}.</p>
-</header>
-{{range $index, $event := .Events}}
-<div class="event">
-	<div class="summary" onclick="toggleDetails({{$index}})">
-		<div class="left">
-			<div><span class="level level-{{$event.Level}}">{{$event.Level}}</span> {{$event.Timestamp}}</div>
-			<div>{{$event.Message}}</div>
-			<div class="caller">{{$event.Caller}}</div>
-		</div>
-		<button class="toggle" type="button">Show details</button>
-	</div>
-	<div id="details-{{$index}}" class="details">
-		<pre>{{html $event.Stack}}</pre>
-	</div>
-</div>
-{{end}}
-<script>
-function toggleDetails(index) {
-	const details = document.getElementById('details-' + index);
-	const button = details.previousElementSibling.querySelector('.toggle');
-	if (details.style.display === 'block') {
-		details.style.display = 'none';
-		button.textContent = 'Show details';
-	} else {
-		details.style.display = 'block';
-		button.textContent = 'Hide details';
-	}
-}
-</script>
-</body>
-</html>`

@@ -285,6 +285,75 @@ func TestM3U8StreamHandler_HandleStream(t *testing.T) {
 	}
 }
 
+func TestM3U8StreamHandler_HandleStream_UsesInitialMasterPlaylistImmediately(t *testing.T) {
+	cfg := &config.StreamConfig{
+		TimeoutSeconds:   5,
+		ChunkSize:        1024,
+		SharedBufferSize: 5,
+	}
+
+	var masterHits atomic.Int32
+	var variantHits atomic.Int32
+	segmentData := []byte("TESTSEGMNT1!")
+
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/master.m3u8":
+			masterHits.Add(1)
+			w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+			fmt.Fprintf(w, "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=250000\n%s/variant.m3u8\n", server.URL)
+		case "/variant.m3u8":
+			variantHits.Add(1)
+			w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+			fmt.Fprint(w, "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\n/segment1.ts\n#EXT-X-ENDLIST\n")
+		case "/segment1.ts":
+			w.Header().Set("Content-Type", "video/MP2T")
+			_, _ = w.Write(segmentData)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/master.m3u8")
+	if err != nil {
+		t.Fatalf("http.Get() error = %v", err)
+	}
+
+	cm := store.NewConcurrencyManager()
+	coordinator := buffer.NewStreamCoordinator("test_id", cfg, cm, logger.Default)
+	handler := NewStreamHandler(cfg, coordinator, logger.Default)
+
+	writer := &mockResponseWriter{}
+	req := httptest.NewRequest(http.MethodGet, "http://proxy.test/p/channel", nil)
+	streamClient := client.NewStreamClient(writer, req)
+
+	lbRes := &loadbalancer.LoadBalancerResult{
+		Response: resp,
+		URL:      server.URL + "/master.m3u8",
+		Index:    "DISC_1_TEST",
+		SubIndex: "a",
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 750*time.Millisecond)
+	defer cancel()
+
+	result := handler.HandleStream(ctx, lbRes, streamClient)
+	if result.Status != proxy.StatusEOF {
+		t.Fatalf("HandleStream() status = %v, want %v", result.Status, proxy.StatusEOF)
+	}
+	if !bytes.Equal(writer.written, segmentData) {
+		t.Fatalf("HandleStream() wrote %q, want %q", writer.written, segmentData)
+	}
+	if got := masterHits.Load(); got != 1 {
+		t.Fatalf("master playlist fetched %d time(s), want 1", got)
+	}
+	if got := variantHits.Load(); got != 1 {
+		t.Fatalf("variant playlist fetched %d time(s), want 1", got)
+	}
+}
+
 func TestM3U8StreamHandler_HandleStream_StripsClientRangeForInternalFetches(t *testing.T) {
 	var playlistRangeSeen atomic.Bool
 	var segmentRangeSeen atomic.Bool

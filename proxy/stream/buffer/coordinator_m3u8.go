@@ -59,7 +59,7 @@ func (c *StreamCoordinator) StartHLSWriter(ctx context.Context, lbResult *loadba
 	defer c.cm.UpdateConcurrency(lbResult.Index, false)
 
 	playlistURL := lbResult.Response.Request.URL.String()
-	lbResult.Response.Body.Close()
+	currentResp := lbResult.Response
 
 	var lastErr error
 	emptyPlaylistCount := 0
@@ -77,15 +77,21 @@ func (c *StreamCoordinator) StartHLSWriter(ctx context.Context, lbResult *loadba
 	c.lastProcessedSeq.Store(lastMediaSeq)
 
 	for atomic.LoadInt32(&c.state) == stateActive {
-		select {
-		case <-ctx.Done():
-			if lastErr == nil {
-				c.logger.Debug("StartHLSWriter: Context cancelled")
-				writeErrorAndReturn(ctx.Err(), proxy.StatusClientClosed)
+		var resp *http.Response
+		if currentResp != nil {
+			resp = currentResp
+			currentResp = nil
+		} else {
+			select {
+			case <-ctx.Done():
+				if lastErr == nil {
+					c.logger.Debug("StartHLSWriter: Context cancelled")
+					writeErrorAndReturn(ctx.Err(), proxy.StatusClientClosed)
+				}
+				return
+			case <-ticker.C:
 			}
-			return
 
-		case <-ticker.C:
 			timeout := time.Duration(c.config.TimeoutSeconds)*time.Second + pollInterval
 			if time.Since(lastChangeTime) > timeout {
 				c.logger.Debug("No sequence changes detected within timeout period")
@@ -93,119 +99,134 @@ func (c *StreamCoordinator) StartHLSWriter(ctx context.Context, lbResult *loadba
 				return
 			}
 
-			resp, err := utils.CustomInternalHttpRequest(streamC.Request, "GET", playlistURL)
+			var err error
+			resp, err = utils.CustomInternalHttpRequest(streamC.Request, "GET", playlistURL)
 			if err != nil {
 				c.logger.Warnf("Failed to fetch playlist: %v", err)
 				lastErr = err
 				continue // Retry on next tick
 			}
+		}
 
-			if resp == nil {
-				c.logger.Warn("Received nil response from HTTP client")
-				continue
-			}
+		if resp == nil {
+			c.logger.Warn("Received nil response from HTTP client")
+			continue
+		}
 
-			if !isAcceptablePlaylistStatus(resp.StatusCode) {
-				resp.Body.Close()
-				c.logger.Warnf("Unexpected status for playlist: %d", resp.StatusCode)
-				lastErr = fmt.Errorf("playlist returned status %d", resp.StatusCode)
-				continue
-			}
-
-			m3uPlaylist, err := io.ReadAll(resp.Body)
+		if !isAcceptablePlaylistStatus(resp.StatusCode) {
 			resp.Body.Close()
+			c.logger.Warnf("Unexpected status for playlist: %d", resp.StatusCode)
+			lastErr = fmt.Errorf("playlist returned status %d", resp.StatusCode)
+			continue
+		}
 
-			if err != nil {
-				c.logger.Warnf("Failed to read playlist body: %v", err)
-				lastErr = err
-				continue
+		_ = utils.MaybeDecompressResponseBody(resp)
+
+		m3uPlaylist, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if err != nil {
+			c.logger.Warnf("Failed to read playlist body: %v", err)
+			lastErr = err
+			continue
+		}
+
+		metadata, err := c.parsePlaylist(playlistURL, string(m3uPlaylist))
+		if err != nil {
+			c.logger.Warnf("Failed to parse playlist: %v", err)
+			lastErr = err
+			continue
+		}
+
+		if metadata.TargetDuration > 0 {
+			newInterval := time.Duration(metadata.TargetDuration * float64(time.Second) / 2)
+			jitter := time.Duration(float64(newInterval) * (0.9 + 0.2*rand.Float64()))
+
+			if math.Abs(float64(jitter-pollInterval)) > float64(pollInterval)*0.1 {
+				pollInterval = jitter
+				ticker.Reset(pollInterval)
+				c.logger.Debugf("Updated polling interval to %v", pollInterval)
 			}
+		}
 
-			metadata, err := c.parsePlaylist(playlistURL, string(m3uPlaylist))
-			if err != nil {
-				c.logger.Warnf("Failed to parse playlist: %v", err)
-				lastErr = err
-				continue
-			}
-
-			if metadata.TargetDuration > 0 {
-				newInterval := time.Duration(metadata.TargetDuration * float64(time.Second) / 2)
-				jitter := time.Duration(float64(newInterval) * (0.9 + 0.2*rand.Float64()))
-
-				if math.Abs(float64(jitter-pollInterval)) > float64(pollInterval)*0.1 {
-					pollInterval = jitter
-					ticker.Reset(pollInterval)
-					c.logger.Debugf("Updated polling interval to %v", pollInterval)
-				}
-			}
-
-			if metadata.IsMaster {
-				if len(metadata.Variants) == 0 {
-					c.logger.Warn("Master playlist has no variants")
-					writeErrorAndReturn(fmt.Errorf("master playlist has no variants"), proxy.StatusServerError)
-					return
-				}
-
-				nextPlaylist := metadata.Variants[0]
-				if nextPlaylist == playlistURL {
-					c.logger.Warnf("Master playlist resolved to itself: %s", playlistURL)
-					writeErrorAndReturn(fmt.Errorf("master playlist resolved to itself"), proxy.StatusServerError)
-					return
-				}
-
-				c.logger.Logf("Master playlist detected. Following first variant: %s", nextPlaylist)
-				playlistURL = nextPlaylist
-				lastMediaSeq = -1
-				c.lastProcessedSeq.Store(lastMediaSeq)
-				lastChangeTime = time.Now()
-				emptyPlaylistCount = 0
-				continue
-			}
-
-			if len(metadata.Segments) == 0 {
-				emptyPlaylistCount++
-				lastErr = fmt.Errorf("playlist has no media segments")
-				c.logger.Warnf("Playlist has no media segments (%s), retry %d", playlistURL, emptyPlaylistCount)
-				if emptyPlaylistCount >= 3 {
-					writeErrorAndReturn(lastErr, proxy.StatusServerError)
-					return
-				}
-				continue
-			}
-			emptyPlaylistCount = 0
-
-			if metadata.IsEndlist {
-				err := c.processSegments(ctx, metadata.Segments, streamC)
-				if err != nil {
-					c.logger.Errorf("Error processing segments: %v", err)
-				}
-				writeErrorAndReturn(io.EOF, proxy.StatusEOF)
+		if metadata.IsMaster {
+			if len(metadata.Variants) == 0 {
+				c.logger.Warn("Master playlist has no variants")
+				writeErrorAndReturn(fmt.Errorf("master playlist has no variants"), proxy.StatusServerError)
 				return
 			}
 
-			if metadata.MediaSequence > lastMediaSeq {
-				lastChangeTime = time.Now()
-				newSegments := c.getNewSegments(metadata.Segments, lastMediaSeq, metadata.MediaSequence)
+			nextPlaylist := metadata.Variants[0]
+			if nextPlaylist == playlistURL {
+				c.logger.Warnf("Master playlist resolved to itself: %s", playlistURL)
+				writeErrorAndReturn(fmt.Errorf("master playlist resolved to itself"), proxy.StatusServerError)
+				return
+			}
 
-				if err := c.processSegments(ctx, newSegments, streamC); err != nil {
-					if ctx.Err() != nil {
-						writeErrorAndReturn(err, proxy.StatusServerError)
-						return
-					}
-					lastErr = err
-				} else {
-					lastMediaSeq = metadata.MediaSequence
-					c.lastProcessedSeq.Store(lastMediaSeq)
-					lastErr = nil // Clear error on success
+			c.logger.Logf("Master playlist detected. Following first variant: %s", nextPlaylist)
+			playlistURL = nextPlaylist
+			lastMediaSeq = -1
+			c.lastProcessedSeq.Store(lastMediaSeq)
+			lastChangeTime = time.Now()
+			emptyPlaylistCount = 0
+
+			currentResp, err = utils.CustomInternalHttpRequest(streamC.Request, "GET", playlistURL)
+			if err != nil {
+				c.logger.Warnf("Failed to fetch master variant: %v", err)
+				lastErr = err
+			}
+			continue
+		}
+
+		if len(metadata.Segments) == 0 {
+			emptyPlaylistCount++
+			lastErr = fmt.Errorf("playlist has no media segments")
+			c.logger.Warnf("Playlist has no media segments (%s), retry %d", playlistURL, emptyPlaylistCount)
+			if emptyPlaylistCount >= 3 {
+				writeErrorAndReturn(lastErr, proxy.StatusServerError)
+				return
+			}
+			continue
+		}
+		emptyPlaylistCount = 0
+
+		if metadata.IsEndlist {
+			err := c.processSegments(ctx, metadata.Segments, streamC)
+			if err != nil {
+				c.logger.Errorf("Error processing segments: %v", err)
+			}
+			writeErrorAndReturn(io.EOF, proxy.StatusEOF)
+			return
+		}
+
+		if metadata.MediaSequence > lastMediaSeq {
+			lastChangeTime = time.Now()
+			newSegments := c.getNewSegments(metadata.Segments, lastMediaSeq, metadata.MediaSequence)
+
+			if err := c.processSegments(ctx, newSegments, streamC); err != nil {
+				if ctx.Err() != nil {
+					writeErrorAndReturn(err, proxy.StatusServerError)
+					return
 				}
+				lastErr = err
+			} else {
+				lastMediaSeq = metadata.MediaSequence
+				c.lastProcessedSeq.Store(lastMediaSeq)
+				lastErr = nil // Clear error on success
 			}
 		}
 	}
 }
 
 func (c *StreamCoordinator) getNewSegments(allSegments []string, lastSeq, currentSeq int64) []string {
+	const startupLiveEdgeSegments = 2
+
 	if lastSeq < 0 {
-		return allSegments
+		if len(allSegments) <= startupLiveEdgeSegments {
+			return allSegments
+		}
+		// For initial live startup, avoid replaying the entire playlist window.
+		return allSegments[len(allSegments)-startupLiveEdgeSegments:]
 	}
 
 	segmentCount := int64(len(allSegments))
@@ -268,7 +289,7 @@ func (c *StreamCoordinator) streamSegment(ctx context.Context, segmentURL string
 		}
 	}
 
-	return c.readAndWriteStream(ctx, resp.Body, func(b []byte) error {
+	return c.readAndWriteStream(ctx, resp.Body, false, func(b []byte) error {
 		chunk := newChunkData()
 		_, _ = chunk.Buffer.Write(b)
 		chunk.Timestamp = time.Now()

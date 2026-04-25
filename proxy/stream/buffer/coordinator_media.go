@@ -39,7 +39,7 @@ func (c *StreamCoordinator) StartMediaWriter(ctx context.Context, lbResult *load
 		close(*ch)
 	}
 
-	err := c.readAndWriteStream(ctx, lbResult.Response.Body, func(b []byte) error {
+	err := c.readAndWriteStream(ctx, lbResult.Response.Body, true, func(b []byte) error {
 		chunk := newChunkData()
 		_, _ = chunk.Buffer.Write(b)
 		chunk.Timestamp = time.Now()

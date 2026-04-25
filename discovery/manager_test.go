@@ -267,3 +267,72 @@ func TestIsM3UContentHandlesBOM(t *testing.T) {
 		t.Fatal("IsM3UContent() should return true for BOM-prefixed playlists")
 	}
 }
+
+func TestPublishDynamicSourcesLockedHonorsDiscoveredSourceOverrides(t *testing.T) {
+	utils.ResetCaches()
+	defer utils.ResetCaches()
+
+	manager := &Manager{
+		jobs: []Job{
+			{ID: "1", Name: "Job One"},
+			{ID: "2", Name: "Job Two"},
+		},
+		sourcesByJob: map[string][]utils.SourceConfig{
+			"1": {
+				{Index: "DISC_1_AAAA", URL: "https://example.com/a.m3u8", Group: "Job One"},
+				{Index: "DISC_1_BBBB", URL: "https://example.com/b.m3u8", Group: "Job One"},
+			},
+			"2": {
+				{Index: "DISC_2_CCCC", URL: "https://example.com/c.m3u8", Group: "Job Two"},
+			},
+		},
+		sourceOverrides: map[string]discoveredSourceOverride{
+			"DISC_1_BBBB": {
+				Index:   "DISC_1_BBBB",
+				Enabled: false,
+			},
+			"DISC_2_CCCC": {
+				Index:   "DISC_2_CCCC",
+				Name:    "Custom C",
+				Enabled: true,
+			},
+		},
+	}
+
+	manager.publishDynamicSourcesLocked()
+
+	sources := utils.GetSourceConfigs()
+	if len(sources) != 2 {
+		t.Fatalf("GetSourceConfigs() len = %d, want 2 (%v)", len(sources), sources)
+	}
+
+	if sources[0].Index != "DISC_1_AAAA" {
+		t.Fatalf("sources[0].Index = %q, want DISC_1_AAAA", sources[0].Index)
+	}
+	if sources[1].Index != "DISC_2_CCCC" {
+		t.Fatalf("sources[1].Index = %q, want DISC_2_CCCC", sources[1].Index)
+	}
+	if sources[1].Name != "Custom C" {
+		t.Fatalf("sources[1].Name = %q, want Custom C", sources[1].Name)
+	}
+
+	discovered := manager.GetDiscoveredSources()
+	if len(discovered) != 3 {
+		t.Fatalf("GetDiscoveredSources() len = %d, want 3 (%v)", len(discovered), discovered)
+	}
+
+	enabledByIndex := make(map[string]bool, len(discovered))
+	for _, source := range discovered {
+		enabledByIndex[source.Index] = source.Enabled
+	}
+
+	if !enabledByIndex["DISC_1_AAAA"] {
+		t.Fatal("DISC_1_AAAA should be enabled")
+	}
+	if enabledByIndex["DISC_1_BBBB"] {
+		t.Fatal("DISC_1_BBBB should be disabled by override")
+	}
+	if !enabledByIndex["DISC_2_CCCC"] {
+		t.Fatal("DISC_2_CCCC should remain enabled")
+	}
+}

@@ -83,18 +83,31 @@ func parseLine(line string, nextLine *LineDetails, m3uIndex string) *StreamInfo 
 		stream.Title = "Unknown Channel"
 	}
 
-	_, _ = stream.URLs.LoadOrStore(m3uIndex, make(map[string]string))
-
-	encodedUrl := base64.StdEncoding.EncodeToString([]byte(cleanUrl))
-
 	if stream.Title == "" {
 		logger.Default.Debugf("Stream missing title, skipping: %s", line)
 		return nil
 	}
 
+	indexStreamURL(stream, m3uIndex, nextLine.LineNum, cleanUrl)
+
+	return stream
+}
+
+func indexStreamURL(stream *StreamInfo, m3uIndex string, sourceIndex int, cleanURL string) {
+	if stream == nil {
+		return
+	}
+
+	if stream.URLs == nil {
+		stream.URLs = xsync.NewMapOf[string, map[string]string]()
+	}
+	_, _ = stream.URLs.LoadOrStore(m3uIndex, make(map[string]string))
+
+	encodedURL := base64.StdEncoding.EncodeToString([]byte(cleanURL))
+
 	// Use URL-safe base64 for filenames to avoid path separators and other invalid chars on Windows.
 	base64Title := base64.RawURLEncoding.EncodeToString([]byte(stream.Title))
-	h := sha3.Sum224([]byte(cleanUrl))
+	h := sha3.Sum224([]byte(cleanURL))
 	urlHash := hex.EncodeToString(h[:])
 
 	// Determine shard from the first 3 hex characters of the URL hash
@@ -105,31 +118,27 @@ func parseLine(line string, nextLine *LineDetails, m3uIndex string) *StreamInfo 
 	filePath := filepath.Join(shardDir, fileName)
 
 	stream.SourceM3U = m3uIndex
-	stream.SourceIndex = nextLine.LineNum
+	stream.SourceIndex = sourceIndex
+	stream.SourceURL = strings.TrimSpace(cleanURL)
 
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
 		// Create shard directory if it doesn't exist
 		if err := os.MkdirAll(shardDir, os.ModePerm); err != nil {
 			logger.Default.Debugf("Error creating shard directory %s: %v", shardDir, err)
 		}
-		content := fmt.Sprintf("%d:::%s", nextLine.LineNum, encodedUrl)
+		content := fmt.Sprintf("%d:::%s", sourceIndex, encodedURL)
 		if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
 			logger.Default.Debugf("Error indexing stream: %s (#%s) -> %v", stream.Title, m3uIndex, err)
 		}
 
-		if stream.URLs == nil {
-			stream.URLs = xsync.NewMapOf[string, map[string]string]()
-		}
 		_, _ = stream.URLs.Compute(m3uIndex, func(oldValue map[string]string, loaded bool) (newValue map[string]string, del bool) {
 			if oldValue == nil {
 				oldValue = make(map[string]string)
 			}
-			oldValue[urlHash] = fmt.Sprintf("%d:::%s", nextLine.LineNum, cleanUrl)
+			oldValue[urlHash] = fmt.Sprintf("%d:::%s", sourceIndex, cleanURL)
 			return oldValue, false
 		})
 	}
-
-	return stream
 }
 
 // formatStreamEntry formats a stream entry for M3U output

@@ -289,6 +289,91 @@ func TestLoadBalancer(t *testing.T) {
 	}
 }
 
+func TestLoadBalancer_M3U8SelectionSkipsThroughputProbeDelay(t *testing.T) {
+	instance, client, _ := setupTestInstance(t)
+	client.responses = map[string]*http.Response{
+		"http://test1.com/stream": {
+			StatusCode: http.StatusOK,
+			Header: http.Header{
+				"Content-Type": []string{"application/vnd.apple.mpegurl"},
+			},
+			Body: io.NopCloser(strings.NewReader("#EXTM3U\n#EXTINF:2,\nseg.ts\n")),
+		},
+	}
+	client.errors = make(map[string]error)
+	client.delay = 0
+
+	start := time.Now()
+	result, err := instance.Balance(context.Background(), newTestRequest(http.MethodGet))
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("Balance() error = %v", err)
+	}
+	if result == nil {
+		t.Fatal("Balance() result is nil")
+	}
+	if elapsed >= 1500*time.Millisecond {
+		t.Fatalf("Balance() took %v for m3u8 source, expected < 1.5s", elapsed)
+	}
+}
+
+func TestLoadBalancer_UsesDiscoveredIndexesFromStreamInfo(t *testing.T) {
+	client := &mockHTTPClient{
+		responses: map[string]*http.Response{
+			"http://discovery.test/master.m3u8": {
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader("#EXTM3U\n")),
+			},
+		},
+		errors: make(map[string]error),
+	}
+
+	indexProvider := &mockIndexProvider{
+		indexes: []string{"1"},
+	}
+
+	urls := xsync.NewMapOf[string, map[string]string]()
+	urls.Store("DISC_1_TEST", map[string]string{
+		"fallback": "0:::http://discovery.test/master.m3u8",
+	})
+
+	slugParser := &mockSlugParser{
+		streams: map[string]*sourceproc.StreamInfo{
+			"disc-stream": {
+				Title: "Discovered Stream",
+				URLs:  urls,
+			},
+		},
+	}
+
+	instance := NewLoadBalancerInstance(
+		store.NewConcurrencyManager(),
+		NewDefaultLBConfig(),
+		WithHTTPClient(client),
+		WithLogger(logger.Default),
+		WithIndexProvider(indexProvider),
+		WithSlugParser(slugParser),
+	)
+
+	req := newTestRequest(http.MethodGet)
+	req.URL.Path = "/disc-stream.m3u8"
+
+	result, err := instance.Balance(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Balance() error = %v, want nil", err)
+	}
+	if result == nil {
+		t.Fatal("Balance() result = nil, want non-nil")
+	}
+	if result.Index != "DISC_1_TEST" {
+		t.Fatalf("Balance() index = %q, want %q", result.Index, "DISC_1_TEST")
+	}
+	if result.URL != "http://discovery.test/master.m3u8" {
+		t.Fatalf("Balance() URL = %q, want %q", result.URL, "http://discovery.test/master.m3u8")
+	}
+}
+
 func TestIsRetryableStreamError(t *testing.T) {
 	tests := []struct {
 		name string

@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -638,4 +640,131 @@ func TestSortingManager_MergesAttributesForDuplicateChannelBeforeFlush(t *testin
 	assert.Equal(t, "1", entries[0].SourceM3U, "Merged channel should keep the earliest source as primary")
 	assert.Equal(t, "discovery.2", entries[0].TvgID, "Merged channel should retain attributes contributed by later duplicates")
 	assert.Equal(t, "Documentary", entries[0].Group, "Merged channel should keep missing metadata filled from duplicates")
+}
+
+func TestProcessorRun_SynthesizesDiscoveredM3U8SourceIntoPlaylist(t *testing.T) {
+	originalConfig := config.GetConfig()
+	tempDir, err := os.MkdirTemp("", "discovery-m3u8-*")
+	require.NoError(t, err)
+
+	originalIncludeRegexes := includeRegexes
+	originalExcludeRegexes := excludeRegexes
+	originalRules := channelRules
+	originalMerges := channelMerges
+
+	config.SetConfig(&config.Config{
+		DataPath: filepath.Join(tempDir, "data"),
+		TempPath: filepath.Join(tempDir, "temp"),
+	})
+	utils.ResetCaches()
+	utils.SetDynamicSources(nil)
+	includeRegexes = nil
+	excludeRegexes = nil
+	channelRules = nil
+	channelMerges = nil
+	filterOnce = sync.Once{}
+
+	t.Setenv("BASE_URL", "http://example.com")
+
+	defer func() {
+		config.SetConfig(originalConfig)
+		utils.ResetCaches()
+		utils.SetDynamicSources(nil)
+		includeRegexes = originalIncludeRegexes
+		excludeRegexes = originalExcludeRegexes
+		channelRules = originalRules
+		channelMerges = originalMerges
+		filterOnce = sync.Once{}
+		_ = os.RemoveAll(tempDir)
+	}()
+
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/provider/master.m3u8":
+			fmt.Fprintf(
+				w,
+				"#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-STREAM-INF:BANDWIDTH=250000\n%s/provider/variant.m3u8\n",
+				server.URL,
+			)
+		case "/provider/variant.m3u8":
+			fmt.Fprint(w, "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.0,\nsegment1.ts\n")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	discoveredURL := server.URL + "/provider/master.m3u8"
+	utils.SetDynamicSources([]utils.SourceConfig{
+		{
+			Index:          "DISC_1_TEST",
+			URL:            discoveredURL,
+			Name:           "Custom Sports",
+			Group:          "Provider Crawl",
+			MaxConcurrency: 1,
+			ContainsVOD:    true,
+		},
+	})
+
+	processor := NewProcessor()
+	require.NotNil(t, processor)
+	require.NoError(t, processor.Run(context.Background(), nil))
+
+	content, err := os.ReadFile(processor.GetResultPath())
+	require.NoError(t, err)
+
+	parsedStreams := parseM3UContent(string(content))
+	require.Len(t, parsedStreams, 1, "discovered m3u8 sources should become a single playlist entry")
+	assert.Equal(t, "Provider Crawl", parsedStreams[0].group)
+	assert.Equal(t, "Custom Sports", parsedStreams[0].name)
+
+	var playlistURL string
+	for _, line := range strings.Split(string(content), "\n") {
+		if strings.HasPrefix(line, "http://example.com/p/") {
+			playlistURL = strings.TrimSpace(line)
+			break
+		}
+	}
+	require.NotEmpty(t, playlistURL, "compiled playlist should contain a proxied stream URL")
+
+	parsedPlaylistURL, err := url.Parse(playlistURL)
+	require.NoError(t, err)
+	slug := path.Base(parsedPlaylistURL.Path)
+	slug = strings.TrimSuffix(slug, path.Ext(slug))
+	require.NotEmpty(t, slug)
+
+	streamInfo, err := ParseStreamInfoBySlug(slug)
+	require.NoError(t, err)
+
+	urlsBySource, ok := streamInfo.URLs.Load("DISC_1_TEST")
+	require.True(t, ok, "slug lookup should reload the discovered source URL")
+
+	var loadedURL string
+	for _, entry := range urlsBySource {
+		parts := strings.SplitN(entry, ":::", 2)
+		if len(parts) == 2 {
+			loadedURL = parts[1]
+			break
+		}
+	}
+	assert.Equal(t, discoveredURL, loadedURL)
+
+	utils.SetDynamicSources(nil)
+
+	fallbackStreamInfo, err := ParseStreamInfoBySlug(slug)
+	require.NoError(t, err)
+
+	fallbackURLsBySource, ok := fallbackStreamInfo.URLs.Load("DISC_1_TEST")
+	require.True(t, ok, "slug lookup should preserve the discovered source even without live dynamic source registration")
+
+	loadedURL = ""
+	for _, entry := range fallbackURLsBySource {
+		parts := strings.SplitN(entry, ":::", 2)
+		if len(parts) == 2 {
+			loadedURL = parts[1]
+			break
+		}
+	}
+	assert.Equal(t, discoveredURL, loadedURL)
 }

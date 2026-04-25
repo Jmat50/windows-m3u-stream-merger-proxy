@@ -47,6 +47,10 @@ func (p *M3U8Processor) processResponse(
 	}
 	defer response.Body.Close()
 
+	// Some upstreams always return gzip; or a client-provided Accept-Encoding may
+	// have been forwarded on the first fetch (before internal re-fetches).
+	_ = utils.MaybeDecompressResponseBody(response)
+
 	base, err := url.Parse(response.Request.URL.String())
 	if err != nil {
 		return err

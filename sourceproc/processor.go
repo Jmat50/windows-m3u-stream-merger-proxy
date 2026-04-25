@@ -287,6 +287,9 @@ func (p *M3UProcessor) cleanup() {
 
 func (p *M3UProcessor) handleDownloaded(result *SourceDownloaderResult, streamCh chan<- *StreamInfo) {
 	var currentLine string
+	sourceConfig, hasSourceConfig := utils.GetSourceConfig(result.Index)
+	treatAsSyntheticDiscovery := hasSourceConfig && isDiscoveredM3U8Source(result.Index, sourceConfig)
+	parsedCount := 0
 
 	// Handle errors asynchronously
 	go func() {
@@ -300,15 +303,27 @@ func (p *M3UProcessor) handleDownloaded(result *SourceDownloaderResult, streamCh
 	// Process lines as they come in
 	for lineInfo := range result.Lines {
 		line := strings.TrimSpace(lineInfo.Content)
+		if treatAsSyntheticDiscovery && strings.HasPrefix(line, "#EXT-X-") {
+			currentLine = ""
+			continue
+		}
+
 		if strings.HasPrefix(line, "#EXTINF:") || strings.HasPrefix(line, "#EXT-X-STREAM-INF:") {
 			currentLine = line
 		} else if currentLine != "" && !strings.HasPrefix(line, "#") {
 			if streamInfo := parseLine(currentLine, lineInfo, result.Index); streamInfo != nil {
+				parsedCount++
 				if checkFilter(streamInfo) {
 					streamCh <- streamInfo
 				}
 			}
 			currentLine = ""
+		}
+	}
+
+	if treatAsSyntheticDiscovery && parsedCount == 0 {
+		if streamInfo := buildSyntheticDiscoveredStream(sourceConfig); streamInfo != nil && checkFilter(streamInfo) {
+			streamCh <- streamInfo
 		}
 	}
 }

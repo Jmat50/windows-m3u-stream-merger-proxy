@@ -4,7 +4,6 @@ import (
 	"container/ring"
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"sync"
@@ -462,6 +461,7 @@ func (c *StreamCoordinator) writeError(err error, status int) {
 func (c *StreamCoordinator) readAndWriteStream(
 	ctx context.Context,
 	body io.ReadCloser,
+	enforceThroughput bool,
 	processChunk func([]byte) error,
 ) error {
 	buffer := make([]byte, c.config.ChunkSize)
@@ -560,12 +560,12 @@ func (c *StreamCoordinator) readAndWriteStream(
 				windowStart = time.Now()
 				windowBytesRead = 0
 
-				if c.config.ExpectedThroughput > 0 &&
+				if enforceThroughput &&
+					c.config.ExpectedThroughput > 0 &&
 					windowThroughput < float64(c.config.ExpectedThroughput) {
 					c.logger.Warnf("Low buffer health: throughput %.2f Bps below expected %d Bps",
 						windowThroughput, c.config.ExpectedThroughput,
 					)
-					return fmt.Errorf("low buffer health: %.2f Bps", windowThroughput)
 				}
 			}
 

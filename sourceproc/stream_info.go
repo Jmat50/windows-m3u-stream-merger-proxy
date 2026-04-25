@@ -13,4 +13,5 @@ type StreamInfo struct {
 	URLs        *xsync.MapOf[string, map[string]string] `json:"-"`
 	SourceM3U   string                                  `json:"source_m3u"`
 	SourceIndex int                                     `json:"source_index"`
+	SourceURL   string                                  `json:"source_url,omitempty"`
 }

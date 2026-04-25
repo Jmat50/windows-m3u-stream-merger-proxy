@@ -1,6 +1,8 @@
 package failovers
 
 import (
+	"bytes"
+	"compress/gzip"
 	"io"
 	"windows-m3u-stream-merger-proxy/logger"
 	"windows-m3u-stream-merger-proxy/proxy/client"
@@ -16,6 +18,53 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestProcessM3U8Stream_HandlesGzipEncodedPlaylists(t *testing.T) {
+	proxyBase := "http://proxy.test"
+	require.NoError(t, os.Setenv("BASE_URL", proxyBase))
+	defer os.Unsetenv("BASE_URL")
+
+	playlist := `#EXTM3U
+#EXT-X-TARGETDURATION:4
+#EXTINF:4,
+segment-a.ts
+#EXTINF:4,
+segment-b.ts
+`
+
+	var gz bytes.Buffer
+	zw := gzip.NewWriter(&gz)
+	_, _ = zw.Write([]byte(playlist))
+	require.NoError(t, zw.Close())
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+		w.Header().Set("Content-Encoding", "gzip")
+		_, _ = w.Write(gz.Bytes())
+	}))
+	defer server.Close()
+
+	originReq := httptest.NewRequest(http.MethodGet, "http://test-client.local/p/channel", nil)
+	recorder := httptest.NewRecorder()
+	streamClient := client.NewStreamClient(recorder, originReq)
+
+	resp, err := http.Get(server.URL)
+	require.NoError(t, err)
+
+	lbResult := &loadbalancer.LoadBalancerResult{
+		Response: resp,
+		Index:    "DISC_1_TEST",
+		SubIndex: "a",
+	}
+
+	processor := NewM3U8Processor(&logger.DefaultLogger{})
+	require.NoError(t, processor.ProcessM3U8Stream(lbResult, streamClient))
+
+	body := recorder.Body.String()
+	assert.Contains(t, body, "#EXTINF:4,")
+	segmentLines := extractSegmentLines(body)
+	require.Len(t, segmentLines, 2)
+}
 
 func TestProcessM3U8Stream_FlattensMasterPlaylistToSingleVariant(t *testing.T) {
 	proxyBase := "http://proxy.test"

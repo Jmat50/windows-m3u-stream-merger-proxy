@@ -7,9 +7,9 @@ import (
 	"testing"
 )
 
-func TestErrorReportCreatesHTML(t *testing.T) {
+func TestErrorReportCreatesTextReport(t *testing.T) {
 	tmpDir := t.TempDir()
-	path := filepath.Join(tmpDir, "errors.html")
+	path := filepath.Join(tmpDir, "errors.txt")
 	SetErrorReportPath(path)
 	ResetErrorReport()
 
@@ -25,14 +25,14 @@ func TestErrorReportCreatesHTML(t *testing.T) {
 	if !strings.Contains(contents, "Test error detail 1") {
 		t.Fatalf("error report did not include message, got: %s", contents)
 	}
-	if !strings.Contains(contents, "Show details") {
-		t.Fatalf("error report did not include details toggle")
+	if !strings.Contains(contents, "Stack:") {
+		t.Fatalf("error report did not include stack details")
 	}
 }
 
 func TestErrorReportLimitsTo50Entries(t *testing.T) {
 	tmpDir := t.TempDir()
-	path := filepath.Join(tmpDir, "errors.html")
+	path := filepath.Join(tmpDir, "errors.txt")
 	SetErrorReportPath(path)
 	ResetErrorReport()
 
@@ -47,7 +47,7 @@ func TestErrorReportLimitsTo50Entries(t *testing.T) {
 	}
 
 	contents := string(data)
-	count := strings.Count(contents, "id=\"details-")
+	count := strings.Count(contents, "Message:")
 	if count != 50 {
 		t.Fatalf("expected 50 events in report, got %d", count)
 	}

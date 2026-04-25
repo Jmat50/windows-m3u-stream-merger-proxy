@@ -65,10 +65,17 @@ type Manager struct {
 	logger           logger.Logger
 	onSourcesChanged func()
 
-	mu           sync.RWMutex
-	jobs         []Job
-	sourcesByJob map[string][]utils.SourceConfig
-	hashByJob    map[string]string
+	mu              sync.RWMutex
+	jobs            []Job
+	sourcesByJob    map[string][]utils.SourceConfig
+	hashByJob       map[string]string
+	sourceOverrides map[string]discoveredSourceOverride
+}
+
+type discoveredSourceOverride struct {
+	Index   string `json:"index"`
+	Name    string `json:"name,omitempty"`
+	Enabled bool   `json:"enabled"`
 }
 
 type document struct {
@@ -98,6 +105,7 @@ func Initialize(ctx context.Context, log logger.Logger, onSourcesChanged func())
 		jobs:             jobs,
 		sourcesByJob:     make(map[string][]utils.SourceConfig, len(jobs)),
 		hashByJob:        make(map[string]string, len(jobs)),
+		sourceOverrides:  loadSourceOverridesFromEnv(),
 	}
 
 	utils.SetDynamicSources(nil)
@@ -176,6 +184,35 @@ func normalizeJob(job Job, index int) Job {
 	return job
 }
 
+func loadSourceOverridesFromEnv() map[string]discoveredSourceOverride {
+	rawConfigs := utils.GetFilters("DISCOVERED_SOURCE_CONFIG")
+	overrides := make(map[string]discoveredSourceOverride, len(rawConfigs))
+
+	for _, raw := range rawConfigs {
+		payload := strings.TrimSpace(raw)
+		if payload == "" {
+			continue
+		}
+
+		override := discoveredSourceOverride{
+			Enabled: true,
+		}
+		if err := json.Unmarshal([]byte(payload), &override); err != nil {
+			continue
+		}
+
+		override.Index = strings.TrimSpace(override.Index)
+		override.Name = strings.TrimSpace(override.Name)
+		if override.Index == "" {
+			continue
+		}
+
+		overrides[override.Index] = override
+	}
+
+	return overrides
+}
+
 func (m *Manager) HasJobs() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -235,9 +272,13 @@ func (m *Manager) refreshJob(ctx context.Context, job Job) (bool, error) {
 
 	sources := make([]utils.SourceConfig, 0, len(urls))
 	for _, discoveredURL := range urls {
+		index := buildDynamicSourceIndex(job, discoveredURL)
+		override := m.sourceOverrides[index]
 		sources = append(sources, utils.SourceConfig{
-			Index:          buildDynamicSourceIndex(job, discoveredURL),
+			Index:          index,
 			URL:            discoveredURL,
+			Name:           override.Name,
+			Group:          job.Name,
 			MaxConcurrency: job.SourceConcurrency,
 			ContainsVOD:    true,
 		})
@@ -267,7 +308,19 @@ func (m *Manager) refreshJob(ctx context.Context, job Job) (bool, error) {
 func (m *Manager) publishDynamicSourcesLocked() {
 	combined := make([]utils.SourceConfig, 0)
 	for _, job := range m.jobs {
-		combined = append(combined, m.sourcesByJob[job.ID]...)
+		for _, source := range m.sourcesByJob[job.ID] {
+			override, ok := m.sourceOverrides[source.Index]
+			if ok && !override.Enabled {
+				continue
+			}
+			if ok && override.Name != "" {
+				source.Name = override.Name
+			}
+			if strings.TrimSpace(source.Group) == "" {
+				source.Group = job.Name
+			}
+			combined = append(combined, source)
+		}
 	}
 	utils.SetDynamicSources(combined)
 }
@@ -848,11 +901,11 @@ func dedupe(values []string) []string {
 
 // DiscoveredSource represents a discovered M3U/M3U8 playlist
 type DiscoveredSource struct {
-	Index     string `json:"index"`
-	URL       string `json:"url"`
-	JobID     string `json:"job_id"`
-	JobName   string `json:"job_name"`
-	Enabled   bool   `json:"enabled"`
+	Index   string `json:"index"`
+	URL     string `json:"url"`
+	JobID   string `json:"job_id"`
+	JobName string `json:"job_name"`
+	Enabled bool   `json:"enabled"`
 }
 
 // GetDiscoveredSources returns all discovered playlist sources
@@ -861,20 +914,19 @@ func (m *Manager) GetDiscoveredSources() []DiscoveredSource {
 	defer m.mu.RUnlock()
 
 	var discovered []DiscoveredSource
-	jobsByID := make(map[string]Job)
 	for _, job := range m.jobs {
-		jobsByID[job.ID] = job
-	}
-
-	for jobID, sources := range m.sourcesByJob {
-		job := jobsByID[jobID]
-		for _, source := range sources {
+		for _, source := range m.sourcesByJob[job.ID] {
+			override, ok := m.sourceOverrides[source.Index]
+			enabled := true
+			if ok {
+				enabled = override.Enabled
+			}
 			discovered = append(discovered, DiscoveredSource{
 				Index:   source.Index,
 				URL:     source.URL,
-				JobID:   jobID,
+				JobID:   job.ID,
 				JobName: job.Name,
-				Enabled: job.Enabled,
+				Enabled: enabled,
 			})
 		}
 	}

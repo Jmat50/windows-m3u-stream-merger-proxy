@@ -170,7 +170,7 @@ func (instance *LoadBalancerInstance) Balance(ctx context.Context, req *http.Req
 
 	err := instance.fetchBackendUrls(streamId)
 	if err != nil {
-		return nil, fmt.Errorf("error fetching sources for: %s", streamId)
+		return nil, fmt.Errorf("error fetching sources for %s: %w", streamId, err)
 	}
 
 	backoff := proxy.NewBackoffStrategy(time.Duration(instance.config.RetryWait)*time.Second, 0)
@@ -249,6 +249,7 @@ func (instance *LoadBalancerInstance) tryAllStreams(ctx context.Context, req *ht
 		return nil, fmt.Errorf("index provider cannot be nil")
 	}
 	m3uIndexes := instance.indexProvider.GetM3UIndexes()
+	m3uIndexes = appendDiscoveryIndexesFromStreamInfo(m3uIndexes, instance.GetStreamInfo())
 	if len(m3uIndexes) == 0 {
 		return nil, fmt.Errorf("no M3U indexes available")
 	}
@@ -340,6 +341,45 @@ func lessSourceIndex(a, b string) bool {
 	return a < b
 }
 
+func appendDiscoveryIndexesFromStreamInfo(indexes []string, stream *sourceproc.StreamInfo) []string {
+	if stream == nil || stream.URLs == nil {
+		return indexes
+	}
+
+	seen := make(map[string]struct{}, len(indexes))
+	merged := make([]string, 0, len(indexes))
+	for _, index := range indexes {
+		trimmed := strings.TrimSpace(index)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		merged = append(merged, trimmed)
+	}
+
+	stream.URLs.Range(func(index string, innerMap map[string]string) bool {
+		trimmed := strings.TrimSpace(index)
+		if trimmed == "" || len(innerMap) == 0 {
+			return true
+		}
+		if !strings.HasPrefix(strings.ToUpper(trimmed), "DISC_") {
+			return true
+		}
+		if _, ok := seen[trimmed]; ok {
+			return true
+		}
+
+		seen[trimmed] = struct{}{}
+		merged = append(merged, trimmed)
+		return true
+	})
+
+	return merged
+}
+
 func sortedIndexKeys(values map[string]struct{}) []string {
 	keys := make([]string, 0, len(values))
 	for key := range values {
@@ -422,6 +462,13 @@ func (instance *LoadBalancerInstance) tryStreamUrls(
 
 			for header, values := range originalHeaders {
 				canonicalHeader := http.CanonicalHeaderKey(header)
+				// This is an upstream "probe" request; avoid forwarding headers that can
+				// cause compressed (gzip) playlists to bypass Go's auto-decompression, or
+				// trigger partial-content behavior that breaks playlist parsing.
+				switch canonicalHeader {
+				case "Accept-Encoding", "Range", "If-Range", "Connection", "Proxy-Connection", "Keep-Alive", "Te", "Trailer", "Transfer-Encoding", "Upgrade", "Host", "Content-Length":
+					continue
+				}
 
 				switch canonicalHeader {
 				case "User-Agent":
@@ -526,12 +573,20 @@ func (instance *LoadBalancerInstance) tryStreamUrls(
 				return
 			}
 
-			health, evalErr := evaluateBufferHealth(resp, instance.config.BufferChunk)
-			if evalErr != nil {
-				instance.logger.Errorf("Error evaluating buffer health: %s", evalErr.Error())
-				instance.markTested(streamId, candidateId)
-				resultCh <- &streamTestResult{err: evalErr}
-				return
+			health := 0.0
+			if utils.IsProbablyM3U8(resp) {
+				// Playlist probes should stay lightweight. Reading for a fixed
+				// measurement window delays startup and penalizes low-bitrate HLS.
+				health = 1.0
+			} else {
+				evaluatedHealth, evalErr := evaluateBufferHealth(resp, instance.config.BufferChunk)
+				if evalErr != nil {
+					instance.logger.Errorf("Error evaluating buffer health: %s", evalErr.Error())
+					instance.markTested(streamId, candidateId)
+					resultCh <- &streamTestResult{err: evalErr}
+					return
+				}
+				health = evaluatedHealth
 			}
 
 			instance.logger.Debugf("Successful stream from %s (health: %f)",

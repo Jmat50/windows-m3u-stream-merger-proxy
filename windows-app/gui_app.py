@@ -33,11 +33,12 @@ except ImportError:
     winreg = None
 
 APP_NAME = "Windows M3U Stream Merger Proxy Desktop"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+CONSOLE_LOG_ARCHIVE_DIR = PROJECT_ROOT / "logs"
 APP_STATE_DIR = Path(os.getenv("LOCALAPPDATA", str(Path.home()))) / "WindowsM3UStreamMergerProxyDesktop"
 SETTINGS_FILE = APP_STATE_DIR / "settings.json"
 APP_LOG_FILE = APP_STATE_DIR / "app.log"
 APP_ERROR_LOG_FILE = APP_STATE_DIR / "error-detail.log"
-APP_ERROR_REPORT_FILE = APP_STATE_DIR / "error-report.html"
 RUNTIME_DIR = APP_STATE_DIR / "runtime"
 DATA_DIR = APP_STATE_DIR / "data"
 TEMP_DIR = APP_STATE_DIR / "temp"
@@ -2729,7 +2730,7 @@ class DesktopApp(tk.Tk):
 
         ttk.Label(
             root,
-            text="Manage discovered M3U/M3U8 playlists from web discovery jobs. Edit names, and choose which channels appear in the final playlist.",
+            text="Manage discovered M3U/M3U8 sources from web discovery jobs. Edit display names, and choose which discovered sources are included in the final playlist.",
             wraplength=860,
             justify=tk.LEFT,
         ).grid(row=0, column=0, sticky="ew", pady=(0, 12))
@@ -2764,7 +2765,7 @@ class DesktopApp(tk.Tk):
         channels_tree.configure(yscrollcommand=scroll_y.set)
 
         # Status label
-        status_var = tk.StringVar(value="Loading discovered channels...")
+        status_var = tk.StringVar(value="Loading discovered sources...")
         ttk.Label(root, textvariable=status_var, foreground="#4f4f4f").grid(
             row=2, column=0, sticky="w", pady=(10, 0)
         )
@@ -2784,7 +2785,7 @@ class DesktopApp(tk.Tk):
                     else:
                         discovered_sources = []
             except Exception as exc:  # noqa: BLE001
-                self._append_log(f"[APP] Failed to fetch discovered channels: {exc}")
+                self._append_log(f"[APP] Failed to fetch discovered sources: {exc}")
                 discovered_sources = []
 
             refresh_tree()
@@ -2830,9 +2831,9 @@ class DesktopApp(tk.Tk):
                 )
 
             if not discovered_sources:
-                status_var.set("No discovered channels yet. Run web discovery jobs to discover M3U/M3U8 playlists.")
+                status_var.set("No discovered sources yet. Run web discovery jobs to discover M3U/M3U8 playlists.")
             else:
-                status_var.set(f"Found {len(discovered_sources)} discovered channel(s).")
+                status_var.set(f"Found {len(discovered_sources)} discovered source(s).")
 
         def on_tree_double_click(event: tk.Event) -> None:
             selected = channels_tree.selection()
@@ -2868,7 +2869,7 @@ class DesktopApp(tk.Tk):
 
         def edit_channel_name(index: str) -> None:
             editor = tk.Toplevel(popup)
-            editor.title("Edit Channel Name")
+            editor.title("Edit Source Name")
             editor.geometry("400x150")
             editor.transient(popup)
             editor.grab_set()
@@ -2909,7 +2910,7 @@ class DesktopApp(tk.Tk):
                 row=1, column=0, columnspan=2, sticky="ew", pady=(0, 12)
             )
 
-            ttk.Label(root_frame, text="Channel Name:").grid(row=2, column=0, sticky="w")
+            ttk.Label(root_frame, text="Source Name:").grid(row=2, column=0, sticky="w")
             name_var = tk.StringVar(value=str(config.get("name", "")).strip())
             name_entry = ttk.Entry(root_frame, textvariable=name_var, width=40)
             name_entry.grid(row=2, column=1, sticky="ew", padx=(8, 0))
@@ -3316,6 +3317,9 @@ class DesktopApp(tk.Tk):
         extra_killed = self._terminate_managed_server_processes()
         if extra_killed > 0:
             self._append_log(f"[APP] Terminated {extra_killed} leftover server process(es).")
+        saved_path = self._save_console_log_snapshot()
+        if saved_path is not None:
+            self._write_persistent_log(f"[APP] Console log snapshot saved: {saved_path}")
         self._hide_tray()
         self._set_last_event("Application exited from tray menu.")
         self._release_instance_lock()
@@ -3590,6 +3594,7 @@ class DesktopApp(tk.Tk):
                 or key.startswith("CHANNEL_SOURCES_")
                 or key.startswith("CHANNEL_MERGE_")
                 or key.startswith("DISCOVERY_JOB_")
+                or key.startswith("DISCOVERED_SOURCE_CONFIG_")
             ):
                 env.pop(key, None)
 
@@ -3606,8 +3611,6 @@ class DesktopApp(tk.Tk):
         env["SHARED_BUFFER"] = _to_bool_env(settings.get("shared_buffer", DEFAULT_SETTINGS["shared_buffer"]))
         env["DATA_PATH"] = str(DATA_DIR)
         env["TEMP_PATH"] = str(TEMP_DIR)
-        env["ERROR_REPORT_PATH"] = str(APP_ERROR_REPORT_FILE)
-
         for index, source in enumerate(settings["sources"], start=1):
             source_url = str(source.get("url", "")).strip()
             if not source_url:
@@ -3680,6 +3683,13 @@ class DesktopApp(tk.Tk):
             if not payload:
                 continue
             env[f"DISCOVERY_JOB_{index}"] = json.dumps(payload[0], separators=(",", ":"), sort_keys=True)
+
+        for index, config in enumerate(self._normalize_discovered_channels_config(settings.get("discovered_channels_config", [])), start=1):
+            env[f"DISCOVERED_SOURCE_CONFIG_{index}"] = json.dumps(
+                config,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
 
         discovery_job_count = len(self._normalize_web_discovery_jobs(settings.get("web_discovery_jobs", [])))
 
@@ -3828,18 +3838,34 @@ class DesktopApp(tk.Tk):
             messagebox.showerror(title, message, parent=parent)
 
     def _open_error_log_clicked(self) -> None:
-        if APP_ERROR_REPORT_FILE.exists():
+        if APP_ERROR_LOG_FILE.exists():
             try:
-                os.startfile(str(APP_ERROR_REPORT_FILE))
+                os.startfile(str(APP_ERROR_LOG_FILE))
                 return
             except OSError as exc:
-                self._show_error("Error Log", f"Could not open error report file:\n{exc}")
+                self._show_error("Error Log", f"Could not open error log file:\n{exc}")
                 return
 
         self._show_error(
             "Error Log",
-            "No error report file was found yet. The server will generate it when an error occurs.",
+            "No error log file was found yet. The app writes this file when errors occur.",
         )
+
+    def _save_console_log_snapshot(self) -> Path | None:
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        export_path = CONSOLE_LOG_ARCHIVE_DIR / f"console-log-{timestamp}.txt"
+        try:
+            CONSOLE_LOG_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+            content = self.log_text.get("1.0", tk.END).rstrip("\n")
+            if not content:
+                content = "\n".join(self.recent_log_lines)
+            if not content:
+                content = "[APP] No console log lines were captured."
+            export_path.write_text(content + "\n", encoding="utf-8")
+            return export_path
+        except OSError as exc:
+            self._write_persistent_log(f"[APP] Failed to write console log snapshot: {exc}")
+            return None
 
     def _write_persistent_log(self, message: str) -> None:
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -3951,6 +3977,9 @@ class DesktopApp(tk.Tk):
     def _on_close(self) -> None:
         if self.is_quitting:
             self._terminate_managed_server_processes()
+            saved_path = self._save_console_log_snapshot()
+            if saved_path is not None:
+                self._write_persistent_log(f"[APP] Console log snapshot saved: {saved_path}")
             self._release_instance_lock()
             self.destroy()
             return

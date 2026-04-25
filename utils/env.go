@@ -12,6 +12,8 @@ import (
 type SourceConfig struct {
 	Index          string
 	URL            string
+	Name           string
+	Group          string
 	MaxConcurrency int
 	ContainsVOD    bool
 }
@@ -149,6 +151,8 @@ func SetDynamicSources(sources []SourceConfig) {
 		normalized = append(normalized, SourceConfig{
 			Index:          index,
 			URL:            url,
+			Name:           strings.TrimSpace(source.Name),
+			Group:          strings.TrimSpace(source.Group),
 			MaxConcurrency: maxConcurrency,
 			ContainsVOD:    source.ContainsVOD,
 		})
@@ -197,6 +201,8 @@ func loadStaticSources() []SourceConfig {
 		sources = append(sources, SourceConfig{
 			Index:          indexString,
 			URL:            url,
+			Name:           "",
+			Group:          "",
 			MaxConcurrency: maxConcurrency,
 			ContainsVOD:    containsVOD,
 		})

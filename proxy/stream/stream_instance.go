@@ -88,6 +88,19 @@ func (instance *StreamInstance) ProxyStream(
 		strings.HasSuffix(strings.ToLower(lbResult.URL), ".ts") ||
 		utils.IsProbablyMedia(lbResult.Response)
 
+	if isM3U8 && !sharedBufferEnabled {
+		// When shared buffer is disabled, serve native HLS playlists/segments
+		// instead of stitching media bytes. This is significantly closer to
+		// direct playback behavior and avoids client-side compatibility issues.
+		coordinator.FinishWriterSetup()
+		if err := instance.failoverProc.ProcessM3U8Stream(lbResult, streamClient); err != nil {
+			statusChan <- proxy.StatusIncompatible
+			return
+		}
+		statusChan <- proxy.StatusM3U8Parsed
+		return
+	}
+
 	if isM3U8 {
 		// This is an M3U8 playlist, handle as HLS stream
 		if _, ok := instance.Cm.Invalid.Load(lbResult.URL); !ok {
