@@ -179,7 +179,9 @@ func loadStreamURLs(stream *StreamInfo, m3uIndex string) error {
 		}
 	}
 
-	stream.URLs.Store(m3uIndex, make(map[string]string))
+	if len(fileMatches) == 0 {
+		return nil
+	}
 
 	for _, fileMatch := range fileMatches {
 		// Extract filename from path (works with sharded structure).

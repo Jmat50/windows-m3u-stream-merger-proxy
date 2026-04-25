@@ -3,6 +3,7 @@ package sourceproc
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"math"
 	"net/http"
 	"os"
@@ -219,8 +220,23 @@ func (p *M3UProcessor) applyNewRemoteFiles() {
 		}
 	}
 
-	_ = os.RemoveAll(config.GetCurrentSlugDirPath())
-	_ = os.Rename(config.GetNewSlugDirPath(), config.GetCurrentSlugDirPath())
+	currentSlugDir := config.GetCurrentSlugDirPath()
+	newSlugDir := config.GetNewSlugDirPath()
+
+	if err := os.MkdirAll(currentSlugDir, 0755); err != nil {
+		logger.Default.Errorf("Error ensuring slug directory %s: %v", currentSlugDir, err)
+		return
+	}
+
+	// Windows Server can deny directory-level remove/rename operations due to
+	// transient handles. Publish slug updates via file-level sync instead.
+	if err := clearDirFiles(currentSlugDir); err != nil {
+		logger.Default.Errorf("Error clearing slug files in %s: %v", currentSlugDir, err)
+	}
+	if copyErr := copyDirContents(newSlugDir, currentSlugDir); copyErr != nil {
+		logger.Default.Errorf("Error copying slug directory %s -> %s: %v", newSlugDir, currentSlugDir, copyErr)
+	}
+	_ = os.RemoveAll(newSlugDir)
 }
 
 func (p *M3UProcessor) cleanFailedRemoteFiles() {
@@ -333,4 +349,50 @@ func createResultFile(path string) (*os.File, error) {
 		return nil, err
 	}
 	return os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
+}
+
+func copyDirContents(srcDir, dstDir string) error {
+	entries, err := os.ReadDir(srcDir)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dstDir, 0755); err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		srcPath := filepath.Join(srcDir, entry.Name())
+		dstPath := filepath.Join(dstDir, entry.Name())
+
+		content, readErr := os.ReadFile(srcPath)
+		if readErr != nil {
+			return fmt.Errorf("read %s: %w", srcPath, readErr)
+		}
+		if writeErr := os.WriteFile(dstPath, content, 0644); writeErr != nil {
+			return fmt.Errorf("write %s: %w", dstPath, writeErr)
+		}
+	}
+
+	return nil
+}
+
+func clearDirFiles(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			// Slug mapping directories are expected to contain files only.
+			continue
+		}
+		filePath := filepath.Join(dir, entry.Name())
+		if removeErr := os.Remove(filePath); removeErr != nil {
+			return fmt.Errorf("remove %s: %w", filePath, removeErr)
+		}
+	}
+	return nil
 }

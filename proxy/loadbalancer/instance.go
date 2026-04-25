@@ -24,6 +24,12 @@ import (
 	"github.com/puzpuzpuz/xsync/v3"
 )
 
+const (
+	streamProbeTimeout      = 15 * time.Second
+	streamProbeRetryCount   = 3
+	streamProbeRetryBackoff = 300 * time.Millisecond
+)
+
 type LoadBalancerInstance struct {
 	infoMu        sync.Mutex
 	info          *sourceproc.StreamInfo
@@ -182,10 +188,10 @@ func (instance *LoadBalancerInstance) Balance(ctx context.Context, req *http.Req
 		if err == nil {
 			return result, nil
 		}
-		instance.logger.Debugf("tryAllStreams error: %v", err)
+		instance.logger.Warnf("tryAllStreams failed for stream %s (lap %d): %v", streamId, lap+1, err)
 
-		if err == context.Canceled {
-			return nil, fmt.Errorf("cancelling load balancer")
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, fmt.Errorf("load balancer context ended for stream %s on lap %d: %w", streamId, lap+1, err)
 		}
 
 		instance.clearTested(streamId)
@@ -193,11 +199,11 @@ func (instance *LoadBalancerInstance) Balance(ctx context.Context, req *http.Req
 		select {
 		case <-time.After(backoff.Next()):
 		case <-ctx.Done():
-			return nil, fmt.Errorf("cancelling load balancer")
+			return nil, fmt.Errorf("load balancer backoff interrupted for stream %s: %w", streamId, ctx.Err())
 		}
 	}
 
-	return nil, fmt.Errorf("error fetching stream: exhausted all streams")
+	return nil, fmt.Errorf("error fetching stream %s: exhausted all streams after %d lap(s)", streamId, instance.config.MaxRetries)
 }
 
 func (instance *LoadBalancerInstance) GetNumTestedIndexes(streamId string) int {
@@ -250,6 +256,7 @@ func (instance *LoadBalancerInstance) tryAllStreams(ctx context.Context, req *ht
 	}
 	m3uIndexes := instance.indexProvider.GetM3UIndexes()
 	m3uIndexes = appendDiscoveryIndexesFromStreamInfo(m3uIndexes, instance.GetStreamInfo())
+	m3uIndexes = availableIndexesForStreamInfo(m3uIndexes, instance.GetStreamInfo())
 	if len(m3uIndexes) == 0 {
 		return nil, fmt.Errorf("no M3U indexes available")
 	}
@@ -276,7 +283,7 @@ func (instance *LoadBalancerInstance) tryAllStreams(ctx context.Context, req *ht
 
 	select {
 	case <-ctx.Done():
-		return nil, context.Canceled
+		return nil, fmt.Errorf("tryAllStreams cancelled before start for %s: %w", streamId, ctx.Err())
 	default:
 		done := make(map[string]bool)
 		initialCount := len(m3uIndexes)
@@ -308,21 +315,26 @@ func (instance *LoadBalancerInstance) tryAllStreams(ctx context.Context, req *ht
 				instance.logger.Errorf("Channel not found from M3U_%s: %s", index, instance.GetStreamInfo().Title)
 				continue
 			}
+			if len(innerMap) == 0 {
+				instance.logger.Warnf("Source M3U_%s has no candidate URLs for stream %s", index, streamId)
+				continue
+			}
 
 			result, err := instance.tryStreamUrls(req, streamId, index, innerMap)
 			if err == nil {
 				return result, nil
 			}
+			instance.logger.Warnf("All URLs failed for stream %s on source M3U_%s: %v", streamId, index, err)
 
 			select {
 			case <-ctx.Done():
-				return nil, context.Canceled
+				return nil, fmt.Errorf("tryAllStreams cancelled while evaluating M3U_%s for %s: %w", index, streamId, ctx.Err())
 			default:
 				continue
 			}
 		}
 	}
-	return nil, fmt.Errorf("no available streams")
+	return nil, fmt.Errorf("no available streams for %s after evaluating %d source index(es)", streamId, len(m3uIndexes))
 }
 
 func lessSourceIndex(a, b string) bool {
@@ -380,6 +392,28 @@ func appendDiscoveryIndexesFromStreamInfo(indexes []string, stream *sourceproc.S
 	return merged
 }
 
+func availableIndexesForStreamInfo(indexes []string, stream *sourceproc.StreamInfo) []string {
+	if stream == nil || stream.URLs == nil {
+		return indexes
+	}
+
+	filtered := make([]string, 0, len(indexes))
+	for _, index := range indexes {
+		innerMap, ok := stream.URLs.Load(index)
+		if !ok || len(innerMap) == 0 {
+			continue
+		}
+		filtered = append(filtered, index)
+	}
+
+	// Preserve previous behavior if URL maps are unexpectedly empty.
+	if len(filtered) == 0 {
+		return indexes
+	}
+
+	return filtered
+}
+
 func sortedIndexKeys(values map[string]struct{}) []string {
 	keys := make([]string, 0, len(values))
 	for key := range values {
@@ -409,6 +443,16 @@ func (instance *LoadBalancerInstance) tryStreamUrls(
 	accept := utils.GetEnv("HTTP_ACCEPT")
 
 	sortedSubIndexes := sourceprocSortStreamSubUrls(urls)
+	if len(sortedSubIndexes) == 0 {
+		return nil, fmt.Errorf("M3U_%s has an empty candidate URL map", index)
+	}
+	failureDetails := make([]string, 0, len(sortedSubIndexes))
+	var failureMu sync.Mutex
+	appendFailure := func(detail string) {
+		failureMu.Lock()
+		failureDetails = append(failureDetails, detail)
+		failureMu.Unlock()
+	}
 
 	var wg sync.WaitGroup
 	resultCh := make(chan *streamTestResult, len(sortedSubIndexes))
@@ -456,6 +500,7 @@ func (instance *LoadBalancerInstance) tryStreamUrls(
 			if err != nil {
 				instance.logger.Errorf("Error creating request: %s", err.Error())
 				instance.markTested(streamId, candidateId)
+				appendFailure(fmt.Sprintf("%s|%s create-request: %v", index, subIndex, err))
 				resultCh <- &streamTestResult{err: err}
 				return
 			}
@@ -497,6 +542,7 @@ func (instance *LoadBalancerInstance) tryStreamUrls(
 				if err != nil {
 					instance.logger.Errorf("Invalid local file URL %s: %s", url, err.Error())
 					instance.markTested(streamId, candidateId)
+					appendFailure(fmt.Sprintf("%s|%s invalid-file-url %s: %v", index, subIndex, url, err))
 					resultCh <- &streamTestResult{err: err}
 					return
 				}
@@ -504,6 +550,7 @@ func (instance *LoadBalancerInstance) tryStreamUrls(
 				if err != nil {
 					instance.logger.Errorf("Error opening local file %s: %s", filePath, err.Error())
 					instance.markTested(streamId, candidateId)
+					appendFailure(fmt.Sprintf("%s|%s open-file %s: %v", index, subIndex, filePath, err))
 					resultCh <- &streamTestResult{err: err}
 					return
 				}
@@ -514,6 +561,7 @@ func (instance *LoadBalancerInstance) tryStreamUrls(
 				if err != nil {
 					instance.logger.Errorf("Error getting file info for %s: %s", filePath, err.Error())
 					instance.markTested(streamId, candidateId)
+					appendFailure(fmt.Sprintf("%s|%s stat-file %s: %v", index, subIndex, filePath, err))
 					resultCh <- &streamTestResult{err: err}
 					return
 				}
@@ -544,7 +592,21 @@ func (instance *LoadBalancerInstance) tryStreamUrls(
 				resp.Header.Set("Content-Type", contentType)
 			} else {
 				// Do the HTTP request for non-file URLs.
-				resp, err = instance.healthClient.Do(newReq)
+				var fetchErr error
+				for attempt := 1; attempt <= streamProbeRetryCount; attempt++ {
+					attemptCtx, attemptCancel := context.WithTimeout(context.Background(), streamProbeTimeout)
+					attemptReq := newReq.Clone(attemptCtx)
+					resp, fetchErr = instance.healthClient.Do(attemptReq)
+					attemptCancel()
+					if fetchErr == nil {
+						break
+					}
+					if !isRetryableStreamError(fetchErr) || attempt == streamProbeRetryCount {
+						break
+					}
+					time.Sleep(time.Duration(attempt) * streamProbeRetryBackoff)
+				}
+				err = fetchErr
 				if err != nil {
 					if isRetryableStreamError(err) {
 						instance.logger.Debugf("Temporary stream fetch error: %s", err.Error())
@@ -552,6 +614,7 @@ func (instance *LoadBalancerInstance) tryStreamUrls(
 						instance.logger.Errorf("Error fetching stream: %s", err.Error())
 					}
 					instance.markTested(streamId, candidateId)
+					appendFailure(fmt.Sprintf("%s|%s fetch %s: %v", index, subIndex, url, err))
 					resultCh <- &streamTestResult{err: err}
 					return
 				}
@@ -560,6 +623,7 @@ func (instance *LoadBalancerInstance) tryStreamUrls(
 			if resp == nil {
 				instance.logger.Errorf("Received nil response from HTTP client")
 				instance.markTested(streamId, candidateId)
+				appendFailure(fmt.Sprintf("%s|%s nil-response %s", index, subIndex, url))
 				resultCh <- &streamTestResult{err: fmt.Errorf("nil response")}
 				return
 			}
@@ -567,6 +631,7 @@ func (instance *LoadBalancerInstance) tryStreamUrls(
 				instance.logger.Errorf("Non-success stream status %d for %s %s",
 					resp.StatusCode, req.Method, url)
 				instance.markTested(streamId, candidateId)
+				appendFailure(fmt.Sprintf("%s|%s status %d %s", index, subIndex, resp.StatusCode, url))
 				resultCh <- &streamTestResult{
 					err: fmt.Errorf("non-success stream status: %d", resp.StatusCode),
 				}
@@ -583,6 +648,7 @@ func (instance *LoadBalancerInstance) tryStreamUrls(
 				if evalErr != nil {
 					instance.logger.Errorf("Error evaluating buffer health: %s", evalErr.Error())
 					instance.markTested(streamId, candidateId)
+					appendFailure(fmt.Sprintf("%s|%s health-eval %s: %v", index, subIndex, url, evalErr))
 					resultCh <- &streamTestResult{err: evalErr}
 					return
 				}
@@ -620,7 +686,10 @@ func (instance *LoadBalancerInstance) tryStreamUrls(
 	if bestResult != nil {
 		return bestResult.result, nil
 	}
-	return nil, fmt.Errorf("all urls failed")
+	if len(failureDetails) == 0 {
+		return nil, fmt.Errorf("all URLs failed for M3U_%s but no detailed failures were captured", index)
+	}
+	return nil, fmt.Errorf("all URLs failed for M3U_%s (%d candidate(s)): %s", index, len(failureDetails), strings.Join(failureDetails, "; "))
 }
 
 func isRetryableStreamError(err error) bool {

@@ -3,6 +3,7 @@ package sourceproc
 import (
 	"encoding/base64"
 	"fmt"
+	"errors"
 	"os"
 	"path/filepath"
 
@@ -43,12 +44,24 @@ func DecodeSlug(slug string) (*StreamInfo, error) {
 	LockSources()
 	defer UnlockSources()
 
-	slugDir := config.GetCurrentSlugDirPath()
-	slugFile := filepath.Join(slugDir, slug)
+	slugDirs := []string{
+		config.GetCurrentSlugDirPath(),
+		config.GetNewSlugDirPath(), // fallback for publish race / Windows rename edge-cases
+	}
 
-	data, err := os.ReadFile(slugFile)
+	var data []byte
+	var err error
+	var readErrs []error
+	for _, slugDir := range slugDirs {
+		slugFile := filepath.Join(slugDir, slug)
+		data, err = os.ReadFile(slugFile)
+		if err == nil {
+			break
+		}
+		readErrs = append(readErrs, fmt.Errorf("%s: %w", slugFile, err))
+	}
 	if err != nil {
-		return nil, fmt.Errorf("slug not found: %v", err)
+		return nil, fmt.Errorf("slug not found: %w", errors.Join(readErrs...))
 	}
 
 	var info StreamInfo

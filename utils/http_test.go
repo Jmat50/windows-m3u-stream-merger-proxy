@@ -1,7 +1,10 @@
 package utils
 
 import (
+	"context"
+	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -115,5 +118,50 @@ func TestCustomHttpRequest_PreservesRangeForForwardProxyRequests(t *testing.T) {
 	}
 	if got := headers.Get("Connection"); got != "" {
 		t.Fatalf("Connection header = %q, want empty", got)
+	}
+}
+
+func TestDialContextWithResolver_FallsBackToResolvedIP(t *testing.T) {
+	t.Helper()
+
+	dialAttempts := make([]string, 0, 4)
+	baseDial := func(_ context.Context, _ string, address string) (net.Conn, error) {
+		dialAttempts = append(dialAttempts, address)
+		if address == "10.10.10.10:443" {
+			c1, c2 := net.Pipe()
+			_ = c2.Close()
+			return c1, nil
+		}
+		return nil, &net.DNSError{Err: "getaddrinfow temporary failure", Name: "cdn.example.com", IsTemporary: true}
+	}
+
+	resolver := func(_ context.Context, host string) ([]string, error) {
+		if host != "cdn.example.com" {
+			return nil, errors.New("unexpected host")
+		}
+		return []string{"10.10.10.10"}, nil
+	}
+
+	conn, err := dialContextWithResolver(context.Background(), "tcp", "cdn.example.com:443", baseDial, resolver)
+	if err != nil {
+		t.Fatalf("dialContextWithResolver() error = %v", err)
+	}
+	if conn == nil {
+		t.Fatal("dialContextWithResolver() returned nil conn")
+	}
+	_ = conn.Close()
+}
+
+func TestGetFallbackDNSServers_FromEnv(t *testing.T) {
+	t.Setenv("FALLBACK_DNS_SERVERS", "9.9.9.9, 1.0.0.1:53")
+	servers := getFallbackDNSServers()
+	if len(servers) != 2 {
+		t.Fatalf("getFallbackDNSServers() len = %d, want 2", len(servers))
+	}
+	if servers[0] != "9.9.9.9:53" {
+		t.Fatalf("getFallbackDNSServers()[0] = %q, want %q", servers[0], "9.9.9.9:53")
+	}
+	if servers[1] != "1.0.0.1:53" {
+		t.Fatalf("getFallbackDNSServers()[1] = %q, want %q", servers[1], "1.0.0.1:53")
 	}
 }

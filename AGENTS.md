@@ -34,6 +34,16 @@
   - validate discovered playlists by checking for `#EXTM3U`
 - Discovery changes trigger a playlist rebuild through the updater callback.
 
+## Streaming Reliability Notes (Critical)
+- **HLS with `SHARED_BUFFER=false`:** discovered `.m3u8` sources must use playlist passthrough (`M3U8Processor`) rather than media-byte stitching. This matches direct-player behavior and avoids Android TV incompatibilities seen in the old path.
+- **Load balancer source filtering:** when selecting stream URLs, only evaluate source indexes that actually exist for the decoded slug stream. Avoid retrying indexes that are absent/empty in `stream.URLs`.
+- **Windows Server 2012 R2 DNS behavior:** upstream lookups can intermittently fail with `getaddrinfow` temporary errors. Outbound HTTP now includes DNS fallback dialing logic in `utils/http.go`.
+- **Fallback DNS config:** `FALLBACK_DNS_SERVERS` can be used to set explicit DNS resolvers (comma-separated, port optional). Defaults to `1.1.1.1:53,8.8.8.8:53`.
+- **Slug publish/read robustness:** on Windows Server, directory rename/remove can fail for slug folders. Slug publish uses file-level sync fallback and decode checks both `slugs` and `new-slugs`.
+- **Diagnostics expectation:** load balancer errors should include stream ID, source index, candidate subindex, URL, and specific failure cause (fetch timeout, DNS lookup failure, HTTP status, etc.). Preserve this detail when changing error handling.
+- **Runbook:** follow `docs/troubleshooting/windows-server-2012r2.md` for incident triage and host validation steps.
+- **Android playback tuning:** follow `docs/troubleshooting/android-client-compatibility.md` when VLC works but Android/Android TV clients fail.
+
 ## Testing Notes
 - Fast package verification that currently passes:
   - `go test ./config ./handlers ./logger ./proxy/... ./sourceproc ./store ./updater ./utils ./discovery`

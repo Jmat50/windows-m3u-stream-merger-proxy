@@ -29,6 +29,8 @@ type StreamHTTPHandler struct {
 	sharedBufferEnabled bool
 }
 
+const loadBalancerSelectionTimeout = 45 * time.Second
+
 func parseBoolEnv(name string, defaultValue bool) bool {
 	value, ok := os.LookupEnv(name)
 	if !ok {
@@ -104,7 +106,7 @@ func (h *StreamHTTPHandler) handleStream(ctx context.Context, streamClient *clie
 
 			h.logger.Debugf("No existing shared buffer found for %s", streamURL)
 			h.logger.Debugf("Client %s executing load balancer.", r.RemoteAddr)
-			lbCtx := ctx
+			lbCtx := context.Background()
 			lbReq := r
 			if len(failedIndexes) > 0 {
 				excluded := make([]string, 0, len(failedIndexes))
@@ -117,11 +119,14 @@ func (h *StreamHTTPHandler) handleStream(ctx context.Context, streamClient *clie
 					streamURL,
 					strings.Join(excluded, ", "),
 				)
-				lbCtx = loadbalancer.WithExcludedIndexes(ctx, excluded)
+				lbCtx = loadbalancer.WithExcludedIndexes(context.Background(), excluded)
 				lbReq = r.Clone(lbCtx)
 			}
 
-			lbResult, err = h.manager.LoadBalancer(lbCtx, lbReq)
+			lbCallCtx, lbCancel := context.WithTimeout(lbCtx, loadBalancerSelectionTimeout)
+			lbReq = lbReq.Clone(lbCallCtx)
+			lbResult, err = h.manager.LoadBalancer(lbCallCtx, lbReq)
+			lbCancel()
 			if err != nil {
 				coordinator.FinishWriterSetup()
 				if len(failedIndexes) > 0 {
@@ -194,7 +199,7 @@ func (h *StreamHTTPHandler) handleStreamWithoutSharedBuffer(ctx context.Context,
 		// Create a fresh coordinator for each attempt to avoid stale state
 		coordinator := buffer.NewStreamCoordinator(streamURL, config.NewDefaultStreamConfig(), h.manager.GetConcurrencyManager(), h.logger)
 
-		lbCtx := ctx
+		lbCtx := context.Background()
 		lbReq := r
 		if len(failedIndexes) > 0 {
 			excluded := make([]string, 0, len(failedIndexes))
@@ -207,11 +212,14 @@ func (h *StreamHTTPHandler) handleStreamWithoutSharedBuffer(ctx context.Context,
 				streamURL,
 				strings.Join(excluded, ", "),
 			)
-			lbCtx = loadbalancer.WithExcludedIndexes(ctx, excluded)
+			lbCtx = loadbalancer.WithExcludedIndexes(context.Background(), excluded)
 			lbReq = r.Clone(lbCtx)
 		}
 
-		lbResult, err := h.manager.LoadBalancer(lbCtx, lbReq)
+		lbCallCtx, lbCancel := context.WithTimeout(lbCtx, loadBalancerSelectionTimeout)
+		lbReq = lbReq.Clone(lbCallCtx)
+		lbResult, err := h.manager.LoadBalancer(lbCallCtx, lbReq)
+		lbCancel()
 		if err != nil {
 			if len(failedIndexes) > 0 {
 				h.logger.Warnf(
@@ -283,7 +291,7 @@ func (h *StreamHTTPHandler) writeStreamError(streamClient *client.StreamClient, 
 func (h *StreamHTTPHandler) handleExitCode(code int, r *http.Request) (done bool, penalizeCurrentSource bool) {
 	switch code {
 	case proxy.StatusIncompatible:
-		h.logger.Errorf("Finished handling M3U8 %s request but failed to parse contents.",
+		h.logger.Errorf("Finished handling M3U8 %s request from %s but failed to parse contents.",
 			r.Method, r.RemoteAddr)
 		fallthrough
 	case proxy.StatusEOF:
@@ -299,7 +307,7 @@ func (h *StreamHTTPHandler) handleExitCode(code int, r *http.Request) (done bool
 		h.logger.Debugf("Finished handling direct %s request: %s", r.Method, r.RemoteAddr)
 		return true, false
 	case proxy.StatusM3U8ParseError:
-		h.logger.Errorf("Finished handling M3U8 %s request but failed to parse contents.",
+		h.logger.Errorf("Finished handling M3U8 %s request from %s but failed to parse contents.",
 			r.Method, r.RemoteAddr)
 		return false, true
 	default:

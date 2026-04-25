@@ -3,6 +3,11 @@ ARCHIVE NOTE
 This file is an upstream reference snapshot and is not the standard README for this fork.
 Use `README.md` for current behavior, setup, and feature documentation.
 
+Fork incident notes (important):
+- Current fork behavior includes Windows Server 2012 R2 resiliency fixes not described in this archive.
+- For DNS/`getaddrinfow` playback failures and Android-vs-VLC compatibility notes, follow `README.md`.
+- For agent-maintained implementation constraints and runtime caveats, follow `AGENTS.md`.
+
 Original upstream reference:
 https://github.com/sonroyaalmerol/m3u-stream-merger-proxy
 

@@ -94,6 +94,13 @@ func (instance *StreamInstance) ProxyStream(
 		// direct playback behavior and avoids client-side compatibility issues.
 		coordinator.FinishWriterSetup()
 		if err := instance.failoverProc.ProcessM3U8Stream(lbResult, streamClient); err != nil {
+			instance.logger.Errorf(
+				"M3U8 passthrough failed for source M3U_%s|%s (%s): %v",
+				lbResult.Index,
+				lbResult.SubIndex,
+				lbResult.URL,
+				err,
+			)
 			statusChan <- proxy.StatusIncompatible
 			return
 		}
@@ -151,6 +158,13 @@ func (instance *StreamInstance) ProxyStream(
 		}
 
 		if err := instance.failoverProc.ProcessM3U8Stream(lbResult, streamClient); err != nil {
+			instance.logger.Errorf(
+				"M3U8 fallback passthrough failed for source M3U_%s|%s (%s): %v",
+				lbResult.Index,
+				lbResult.SubIndex,
+				lbResult.URL,
+				err,
+			)
 			statusChan <- proxy.StatusIncompatible
 			return
 		}

@@ -4,7 +4,7 @@ Windows M3U Stream Merger Proxy is a Windows-first IPTV proxy and playlist merge
 
 This is the canonical README for this repository. The old upstream-oriented reference is kept in `LEGACY README.txt` for archive purposes only.
 
-## What Makes This Fork Different
+## What Makes This Project Different
 
 - Windows desktop app for start/stop, settings, logs, and source management
 - Static source support for remote URLs and local `file://` M3U files
@@ -160,13 +160,52 @@ Discovery jobs can:
 | `SHARED_BUFFER` | Enables or disables shared buffering for direct media paths. |
 | `DEBUG` | Enables debug logging. |
 | `SAFE_LOGS` | Redacts URLs from logs for safer sharing. |
-| `ERROR_REPORT_PATH` | Optional desktop error-report output path. |
+| `FALLBACK_DNS_SERVERS` | Optional DNS fallback list for outbound HTTP lookups (`ip[:port],ip[:port]`). Defaults: `1.1.1.1:53,8.8.8.8:53`. |
 
 ## Notes for Contributors
 
 - Source indexing is centralized in `utils/env.go`; avoid adding new direct env scans for source lists.
 - Dynamic discovery sources are injected through `utils.SetDynamicSources(...)`.
 - The Windows app is the user-facing settings layer and should stay aligned with server env behavior.
+
+## Troubleshooting (Windows + Player Compatibility)
+
+For a full Windows Server runbook, see [`docs/troubleshooting/windows-server-2012r2.md`](docs/troubleshooting/windows-server-2012r2.md).
+For Android/Android TV player behavior differences, see [`docs/troubleshooting/android-client-compatibility.md`](docs/troubleshooting/android-client-compatibility.md).
+
+### Android TV app fails but VLC works
+
+This usually indicates stricter HLS-client behavior (Android TV apps are often less tolerant than VLC), not necessarily a bad stream source. Current proxy behavior for discovered HLS sources is:
+
+- with `SHARED_BUFFER=false`, proxy serves playlist passthrough for `.m3u8` streams
+- segment fetches stay proxied under `/segment/...`
+
+If VLC works but Android does not, check server logs first for upstream fetch errors, DNS timeouts, or parse failures before tuning player settings.
+
+### Windows Server 2012 R2: intermittent DNS errors
+
+If logs show errors like:
+
+- `lookup <host>: getaddrinfow: temporary error during hostname resolution`
+- `context deadline exceeded` during upstream playlist fetch
+
+then the issue is typically host DNS reliability. This repo now includes DNS-fallback dialing in `utils/http.go`. You can set:
+
+```text
+FALLBACK_DNS_SERVERS=1.1.1.1,8.8.8.8
+```
+
+for explicit fallback resolvers.
+
+Recommended host checks on 2012 R2:
+
+- `nslookup <upstream-host>`
+- `Resolve-DnsName <upstream-host>`
+- `curl.exe -I "<upstream-m3u8-url>"`
+
+### Slug mapping on Windows Server
+
+If stream-token lookups fail after refresh, verify `DATA_PATH` and logs around slug publish. The server now uses Windows-safe slug sync behavior (file-level fallback) and slug decode fallback from `slugs` to `new-slugs`.
 
 ## Validation Commands
 
