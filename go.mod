@@ -11,7 +11,7 @@ require (
 	github.com/projectdiscovery/katana v1.5.0
 	github.com/puzpuzpuz/xsync/v3 v3.5.1
 	github.com/robfig/cron/v3 v3.0.1
-	github.com/rs/zerolog v1.34.0
+	github.com/rs/zerolog v1.35.1
 	github.com/stretchr/testify v1.11.1
 	github.com/temoto/robotstxt v1.1.2
 	github.com/valyala/bytebufferpool v1.0.0
