@@ -15,6 +15,8 @@ import (
 	"github.com/puzpuzpuz/xsync/v3"
 )
 
+const directSourceProxyingEnv = "DIRECT_SOURCE_PROXYING"
+
 func GetStreamBySlug(slug string) (*StreamInfo, error) {
 	var err error
 	streamInfo, err := ParseStreamInfoBySlug(slug)
@@ -113,5 +115,14 @@ func ClearProcessedM3Us() {
 	if err != nil {
 		logger.Default.Error(err.Error())
 	}
+}
+
+func directSourceProxyingEnabled() bool {
+	rawValue := strings.TrimSpace(os.Getenv(directSourceProxyingEnv))
+	enabled, err := strconv.ParseBool(rawValue)
+	if err != nil {
+		return false
+	}
+	return enabled
 }
 

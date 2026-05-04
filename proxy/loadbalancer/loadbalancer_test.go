@@ -77,6 +77,51 @@ func (m *mockHTTPClient) Do(req *http.Request) (*http.Response, error) {
 	}, nil
 }
 
+type contextBoundReadCloser struct {
+	ctx  context.Context
+	data []byte
+}
+
+func (c *contextBoundReadCloser) Read(p []byte) (int, error) {
+	select {
+	case <-c.ctx.Done():
+		return 0, c.ctx.Err()
+	default:
+	}
+
+	if len(c.data) == 0 {
+		return 0, io.EOF
+	}
+
+	n := copy(p, c.data)
+	c.data = c.data[n:]
+	return n, nil
+}
+
+func (c *contextBoundReadCloser) Close() error {
+	c.data = nil
+	return nil
+}
+
+type contextBoundHTTPClient struct {
+	contentType string
+	body        string
+}
+
+func (c *contextBoundHTTPClient) Do(req *http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header: http.Header{
+			"Content-Type": []string{c.contentType},
+		},
+		Body: &contextBoundReadCloser{
+			ctx:  req.Context(),
+			data: []byte(c.body),
+		},
+		Request: req,
+	}, nil
+}
+
 type mockIndexProvider struct {
 	indexes []string
 }
@@ -371,6 +416,54 @@ func TestLoadBalancer_UsesDiscoveredIndexesFromStreamInfo(t *testing.T) {
 	}
 	if result.URL != "http://discovery.test/master.m3u8" {
 		t.Fatalf("Balance() URL = %q, want %q", result.URL, "http://discovery.test/master.m3u8")
+	}
+}
+
+func TestLoadBalancer_ReturnedM3U8BodySurvivesProbeContextCancellation(t *testing.T) {
+	client := &contextBoundHTTPClient{
+		contentType: "application/vnd.apple.mpegurl",
+		body:        "#EXTM3U\n#EXTINF:2,\nseg.ts\n",
+	}
+
+	urls := xsync.NewMapOf[string, map[string]string]()
+	urls.Store("DISC_1_TEST", map[string]string{
+		"primary": "0:::http://discovery.test/media.m3u8",
+	})
+
+	instance := NewLoadBalancerInstance(
+		store.NewConcurrencyManager(),
+		NewDefaultLBConfig(),
+		WithHTTPClient(client),
+		WithLogger(logger.Default),
+		WithIndexProvider(&mockIndexProvider{indexes: []string{"DISC_1_TEST"}}),
+		WithSlugParser(&mockSlugParser{
+			streams: map[string]*sourceproc.StreamInfo{
+				"disc-stream": {
+					Title: "Discovered Stream",
+					URLs:  urls,
+				},
+			},
+		}),
+	)
+
+	req := newTestRequest(http.MethodGet)
+	req.URL.Path = "/disc-stream.m3u8"
+
+	result, err := instance.Balance(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Balance() error = %v, want nil", err)
+	}
+	if result == nil || result.Response == nil || result.Response.Body == nil {
+		t.Fatal("Balance() returned no readable response body")
+	}
+	defer result.Response.Body.Close()
+
+	body, readErr := io.ReadAll(result.Response.Body)
+	if readErr != nil {
+		t.Fatalf("reading returned response body failed: %v", readErr)
+	}
+	if got := string(body); got != "#EXTM3U\n#EXTINF:2,\nseg.ts\n" {
+		t.Fatalf("returned body = %q, want original playlist", got)
 	}
 }
 

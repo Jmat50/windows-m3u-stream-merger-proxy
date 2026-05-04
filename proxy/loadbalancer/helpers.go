@@ -14,6 +14,7 @@ type streamTestResult struct {
 	result *LoadBalancerResult
 	health float64
 	err    error
+	order  int
 }
 
 func evaluateBufferHealth(resp *http.Response, readChunkSize int) (float64, error) {

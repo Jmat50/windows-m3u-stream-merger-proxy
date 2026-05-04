@@ -429,6 +429,151 @@ func isAcceptableStreamStatus(statusCode int) bool {
 	return statusCode == http.StatusOK || statusCode == http.StatusPartialContent
 }
 
+func (instance *LoadBalancerInstance) buildStreamRequest(
+	req *http.Request,
+	url string,
+	userAgent string,
+	accept string,
+) (*http.Request, error) {
+	origHasUA := false
+	origHasAccept := false
+	originalHeaders := req.Header.Clone()
+
+	newReq, err := http.NewRequest(req.Method, url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	for header, values := range originalHeaders {
+		canonicalHeader := http.CanonicalHeaderKey(header)
+		// This is an upstream request; avoid forwarding headers that can
+		// trigger compressed playlists to bypass Go's auto-decompression or
+		// partial-content behavior that breaks playlist parsing.
+		switch canonicalHeader {
+		case "Accept-Encoding", "Range", "If-Range", "Connection", "Proxy-Connection", "Keep-Alive", "Te", "Trailer", "Transfer-Encoding", "Upgrade", "Host", "Content-Length":
+			continue
+		}
+
+		switch canonicalHeader {
+		case "User-Agent":
+			origHasUA = true
+		case "Accept":
+			origHasAccept = true
+		}
+
+		for _, v := range values {
+			newReq.Header.Add(header, v)
+		}
+	}
+
+	if !origHasUA {
+		newReq.Header.Set("User-Agent", userAgent)
+	}
+	if !origHasAccept {
+		newReq.Header.Set("Accept", accept)
+	}
+
+	return newReq, nil
+}
+
+func openLocalStreamResponse(req *http.Request, url string) (*http.Response, error) {
+	filePath, err := utils.FileURLToPath(url)
+	if err != nil {
+		return nil, fmt.Errorf("invalid local file URL %s: %w", url, err)
+	}
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("open local file %s: %w", filePath, err)
+	}
+
+	fileInfo, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("stat local file %s: %w", filePath, err)
+	}
+
+	resp := &http.Response{
+		StatusCode:    http.StatusOK,
+		Header:        make(http.Header),
+		Body:          file,
+		ContentLength: fileInfo.Size(),
+		Request:       req,
+	}
+
+	contentType := "application/octet-stream"
+	if ext := strings.ToLower(filepath.Ext(filePath)); ext != "" {
+		switch ext {
+		case ".ts":
+			contentType = "video/MP2T"
+		case ".mp4":
+			contentType = "video/mp4"
+		case ".m3u8":
+			contentType = "application/x-mpegURL"
+		case ".m3u":
+			contentType = "audio/x-mpegurl"
+		}
+	}
+	resp.Header.Set("Content-Type", contentType)
+
+	return resp, nil
+}
+
+func (instance *LoadBalancerInstance) openStreamResponse(
+	req *http.Request,
+	url string,
+	userAgent string,
+	accept string,
+	timeout time.Duration,
+) (*http.Response, func(), error) {
+	newReq, err := instance.buildStreamRequest(req, url, userAgent, accept)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if strings.HasPrefix(url, "file://") {
+		resp, err := openLocalStreamResponse(newReq, url)
+		return resp, func() {}, err
+	}
+
+	if instance.healthClient == nil {
+		return nil, nil, fmt.Errorf("HTTP client cannot be nil")
+	}
+
+	var resp *http.Response
+	var fetchErr error
+	for attempt := 1; attempt <= streamProbeRetryCount; attempt++ {
+		activeReq := newReq
+		release := func() {}
+		if timeout > 0 {
+			attemptCtx, attemptCancel := context.WithTimeout(context.Background(), timeout)
+			activeReq = newReq.Clone(attemptCtx)
+			release = attemptCancel
+		}
+
+		resp, fetchErr = instance.healthClient.Do(activeReq)
+		if fetchErr == nil {
+			return resp, release, nil
+		}
+		release()
+
+		if !isRetryableStreamError(fetchErr) || attempt == streamProbeRetryCount {
+			break
+		}
+		time.Sleep(time.Duration(attempt) * streamProbeRetryBackoff)
+	}
+
+	return nil, nil, fetchErr
+}
+
+func closeStreamResponse(resp *http.Response, release func()) {
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+	if release != nil {
+		release()
+	}
+}
+
 func (instance *LoadBalancerInstance) tryStreamUrls(
 	req *http.Request,
 	streamId string,
@@ -457,7 +602,7 @@ func (instance *LoadBalancerInstance) tryStreamUrls(
 	var wg sync.WaitGroup
 	resultCh := make(chan *streamTestResult, len(sortedSubIndexes))
 
-	for _, subIndex := range sortedSubIndexes {
+	for order, subIndex := range sortedSubIndexes {
 		fileContent, ok := urls[subIndex]
 		if !ok {
 			continue
@@ -489,136 +634,22 @@ func (instance *LoadBalancerInstance) tryStreamUrls(
 		}
 
 		wg.Add(1)
-		go func(subIndex, url, candidateId string) {
+		go func(order int, subIndex, url, candidateId string) {
 			defer wg.Done()
 
-			origHasUA := false
-			origHasAccept := false
-			originalHeaders := req.Header.Clone()
-
-			newReq, err := http.NewRequest(req.Method, url, nil)
+			resp, release, err := instance.openStreamResponse(req, url, userAgent, accept, streamProbeTimeout)
 			if err != nil {
-				instance.logger.Errorf("Error creating request: %s", err.Error())
+				if isRetryableStreamError(err) {
+					instance.logger.Debugf("Temporary stream fetch error: %s", err.Error())
+				} else {
+					instance.logger.Errorf("Error fetching stream: %s", err.Error())
+				}
 				instance.markTested(streamId, candidateId)
-				appendFailure(fmt.Sprintf("%s|%s create-request: %v", index, subIndex, err))
+				appendFailure(fmt.Sprintf("%s|%s fetch %s: %v", index, subIndex, url, err))
 				resultCh <- &streamTestResult{err: err}
 				return
 			}
-
-			for header, values := range originalHeaders {
-				canonicalHeader := http.CanonicalHeaderKey(header)
-				// This is an upstream "probe" request; avoid forwarding headers that can
-				// cause compressed (gzip) playlists to bypass Go's auto-decompression, or
-				// trigger partial-content behavior that breaks playlist parsing.
-				switch canonicalHeader {
-				case "Accept-Encoding", "Range", "If-Range", "Connection", "Proxy-Connection", "Keep-Alive", "Te", "Trailer", "Transfer-Encoding", "Upgrade", "Host", "Content-Length":
-					continue
-				}
-
-				switch canonicalHeader {
-				case "User-Agent":
-					origHasUA = true
-				case "Accept":
-					origHasAccept = true
-				}
-
-				for _, v := range values {
-					newReq.Header.Add(header, v)
-				}
-			}
-
-			if !origHasUA {
-				newReq.Header.Set("User-Agent", userAgent)
-			}
-			if !origHasAccept {
-				newReq.Header.Set("Accept", accept)
-			}
-
-			var resp *http.Response
-
-			// Handle file:// URLs specially
-			if strings.HasPrefix(url, "file://") {
-				filePath, err := utils.FileURLToPath(url)
-				if err != nil {
-					instance.logger.Errorf("Invalid local file URL %s: %s", url, err.Error())
-					instance.markTested(streamId, candidateId)
-					appendFailure(fmt.Sprintf("%s|%s invalid-file-url %s: %v", index, subIndex, url, err))
-					resultCh <- &streamTestResult{err: err}
-					return
-				}
-				file, err := os.Open(filePath)
-				if err != nil {
-					instance.logger.Errorf("Error opening local file %s: %s", filePath, err.Error())
-					instance.markTested(streamId, candidateId)
-					appendFailure(fmt.Sprintf("%s|%s open-file %s: %v", index, subIndex, filePath, err))
-					resultCh <- &streamTestResult{err: err}
-					return
-				}
-				defer file.Close()
-
-				// Get file info for content type detection
-				fileInfo, err := file.Stat()
-				if err != nil {
-					instance.logger.Errorf("Error getting file info for %s: %s", filePath, err.Error())
-					instance.markTested(streamId, candidateId)
-					appendFailure(fmt.Sprintf("%s|%s stat-file %s: %v", index, subIndex, filePath, err))
-					resultCh <- &streamTestResult{err: err}
-					return
-				}
-
-				// Create a response-like object for local files
-				resp = &http.Response{
-					StatusCode:    http.StatusOK,
-					Header:        make(http.Header),
-					Body:          file,
-					ContentLength: fileInfo.Size(),
-					Request:       newReq,
-				}
-
-				// Set content type based on file extension
-				contentType := "application/octet-stream"
-				if ext := strings.ToLower(filepath.Ext(filePath)); ext != "" {
-					switch ext {
-					case ".ts":
-						contentType = "video/MP2T"
-					case ".mp4":
-						contentType = "video/mp4"
-					case ".m3u8":
-						contentType = "application/x-mpegURL"
-					case ".m3u":
-						contentType = "audio/x-mpegurl"
-					}
-				}
-				resp.Header.Set("Content-Type", contentType)
-			} else {
-				// Do the HTTP request for non-file URLs.
-				var fetchErr error
-				for attempt := 1; attempt <= streamProbeRetryCount; attempt++ {
-					attemptCtx, attemptCancel := context.WithTimeout(context.Background(), streamProbeTimeout)
-					attemptReq := newReq.Clone(attemptCtx)
-					resp, fetchErr = instance.healthClient.Do(attemptReq)
-					attemptCancel()
-					if fetchErr == nil {
-						break
-					}
-					if !isRetryableStreamError(fetchErr) || attempt == streamProbeRetryCount {
-						break
-					}
-					time.Sleep(time.Duration(attempt) * streamProbeRetryBackoff)
-				}
-				err = fetchErr
-				if err != nil {
-					if isRetryableStreamError(err) {
-						instance.logger.Debugf("Temporary stream fetch error: %s", err.Error())
-					} else {
-						instance.logger.Errorf("Error fetching stream: %s", err.Error())
-					}
-					instance.markTested(streamId, candidateId)
-					appendFailure(fmt.Sprintf("%s|%s fetch %s: %v", index, subIndex, url, err))
-					resultCh <- &streamTestResult{err: err}
-					return
-				}
-			}
+			defer closeStreamResponse(resp, release)
 
 			if resp == nil {
 				instance.logger.Errorf("Received nil response from HTTP client")
@@ -659,32 +690,63 @@ func (instance *LoadBalancerInstance) tryStreamUrls(
 				url, health)
 			resultCh <- &streamTestResult{
 				result: &LoadBalancerResult{
-					Response: resp,
 					URL:      url,
 					Index:    index,
 					SubIndex: subIndex,
 				},
 				health: health,
 				err:    nil,
+				order:  order,
 			}
-		}(subIndex, url, id)
+		}(order, subIndex, url, id)
 	}
 
 	wg.Wait()
 	close(resultCh)
 
-	var bestResult *streamTestResult
+	candidates := make([]*streamTestResult, 0, len(sortedSubIndexes))
 	for res := range resultCh {
 		if res.err != nil {
 			continue
 		}
-		if bestResult == nil || res.health > bestResult.health {
-			bestResult = res
-		}
+		candidates = append(candidates, res)
 	}
 
-	if bestResult != nil {
-		return bestResult.result, nil
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].health != candidates[j].health {
+			return candidates[i].health > candidates[j].health
+		}
+		return candidates[i].order < candidates[j].order
+	})
+
+	for _, candidate := range candidates {
+		if candidate == nil || candidate.result == nil {
+			continue
+		}
+
+		candidateId := candidate.result.Index + "|" + candidate.result.SubIndex
+		resp, release, err := instance.openStreamResponse(req, candidate.result.URL, userAgent, accept, 0)
+		if err != nil {
+			instance.markTested(streamId, candidateId)
+			appendFailure(fmt.Sprintf("%s|%s refetch %s: %v", candidate.result.Index, candidate.result.SubIndex, candidate.result.URL, err))
+			continue
+		}
+		if resp == nil {
+			instance.markTested(streamId, candidateId)
+			appendFailure(fmt.Sprintf("%s|%s refetch-nil %s", candidate.result.Index, candidate.result.SubIndex, candidate.result.URL))
+			closeStreamResponse(resp, release)
+			continue
+		}
+		if !isAcceptableStreamStatus(resp.StatusCode) {
+			instance.markTested(streamId, candidateId)
+			appendFailure(fmt.Sprintf("%s|%s refetch-status %d %s", candidate.result.Index, candidate.result.SubIndex, resp.StatusCode, candidate.result.URL))
+			closeStreamResponse(resp, release)
+			continue
+		}
+
+		closeStreamResponse(nil, release)
+		candidate.result.Response = resp
+		return candidate.result, nil
 	}
 	if len(failureDetails) == 0 {
 		return nil, fmt.Errorf("all URLs failed for M3U_%s but no detailed failures were captured", index)

@@ -269,7 +269,7 @@ func (p *M3UProcessor) compileM3U(baseURL string) {
 		close(p.revalidatingDone)
 	}()
 
-	_, err := p.writer.WriteString("#EXTM3U\n")
+	_, err := p.writer.WriteString(utils.BuildPlaylistHeaderLine())
 	if err != nil {
 		p.markCriticalError(err)
 		return
@@ -278,7 +278,7 @@ func (p *M3UProcessor) compileM3U(baseURL string) {
 	err = p.sortingMgr.GetSortedEntries(func(entry *StreamInfo) {
 		_, writeErr := p.writer.WriteString(formatStreamEntry(baseURL, entry))
 		if writeErr != nil {
-			p.markCriticalError(err)
+			p.markCriticalError(writeErr)
 		}
 	})
 	if err != nil {
@@ -287,7 +287,7 @@ func (p *M3UProcessor) compileM3U(baseURL string) {
 	}
 
 	if flushErr := p.writer.Flush(); flushErr != nil {
-		p.markCriticalError(err)
+		p.markCriticalError(flushErr)
 		return
 	}
 }

@@ -9,6 +9,7 @@ type StreamInfo struct {
 	TvgChNo     string                                  `json:"tvg_ch"`
 	TvgType     string                                  `json:"tvg_type"`
 	LogoURL     string                                  `json:"logo"`
+	AutoLogoURL bool                                    `json:"-"`
 	Group       string                                  `json:"group"`
 	URLs        *xsync.MapOf[string, map[string]string] `json:"-"`
 	SourceM3U   string                                  `json:"source_m3u"`

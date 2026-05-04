@@ -2,6 +2,7 @@ package sourceproc
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -148,6 +149,69 @@ func parseM3UContent(content string) []testStreamInfo {
 		}
 	}
 	return streams
+}
+
+func newAutoChannelIconsTestServer(t *testing.T) *httptest.Server {
+	t.Helper()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/contents/countries/united-states", func(w http.ResponseWriter, r *http.Request) {
+		t.Helper()
+		w.Header().Set("Content-Type", "application/json")
+		require.NoError(t, json.NewEncoder(w).Encode([]map[string]string{
+			{
+				"type":         "file",
+				"name":         "discovery-channel-us.png",
+				"path":         "countries/united-states/discovery-channel-us.png",
+				"download_url": "http://" + r.Host + "/raw/discovery-channel-us.png",
+			},
+			{
+				"type":         "file",
+				"name":         "fox-us.png",
+				"path":         "countries/united-states/fox-us.png",
+				"download_url": "http://" + r.Host + "/raw/fox-us.png",
+			},
+			{
+				"type": "dir",
+				"name": "custom",
+				"path": "countries/united-states/custom",
+				"url":  "http://" + r.Host + "/contents/countries/united-states/custom",
+			},
+		}))
+	})
+	mux.HandleFunc("/contents/countries/united-states/custom", func(w http.ResponseWriter, r *http.Request) {
+		t.Helper()
+		w.Header().Set("Content-Type", "application/json")
+		require.NoError(t, json.NewEncoder(w).Encode([]map[string]string{
+			{
+				"type":         "file",
+				"name":         "cnn-us.png",
+				"path":         "countries/united-states/custom/cnn-us.png",
+				"download_url": "http://" + r.Host + "/raw/cnn-us.png",
+			},
+		}))
+	})
+
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	return server
+}
+
+func useAutoChannelIconsTestServer(t *testing.T, server *httptest.Server) {
+	t.Helper()
+
+	originalBaseURL := tvLogosContentsBaseURL
+	originalHTTPClient := tvLogosHTTPClient
+
+	tvLogosContentsBaseURL = server.URL + "/contents/countries/united-states"
+	tvLogosHTTPClient = server.Client()
+	autoChannelIconCache.resetForTests()
+
+	t.Cleanup(func() {
+		tvLogosContentsBaseURL = originalBaseURL
+		tvLogosHTTPClient = originalHTTPClient
+		autoChannelIconCache.resetForTests()
+	})
 }
 
 func TestRevalidatingGetM3U(t *testing.T) {
@@ -570,6 +634,134 @@ func TestMergeAttributesToM3UFile(t *testing.T) {
 	assert.Contains(t, contentStr, `tvg-id="id-2"`, "Should contain tvg-id from merged attributes")
 	assert.Contains(t, contentStr, `tvg-type="type-2"`, "Should contain tvg-type from merged attributes")
 	assert.Contains(t, contentStr, `tvg-logo="http://example.com/a/aHR0cDovL2xvZ28vc291cmNlNC5wbmc="`, "Should contain tvg-logo from merged attributes")
+}
+
+func TestParseLine_AutoAssignsLogoFromTVLogoRepository(t *testing.T) {
+	cleanup := setupTestEnvironment(t)
+	defer cleanup()
+
+	server := newAutoChannelIconsTestServer(t)
+	useAutoChannelIconsTestServer(t, server)
+	t.Setenv("AUTO_RETRIEVE_CHANNEL_ICONS", "true")
+
+	stream := parseLine(
+		`#EXTINF:-1 tvg-id="discovery.us" tvg-name="Discovery Channel",Discovery Channel`,
+		&LineDetails{Content: "http://example.com/discovery", LineNum: 1},
+		"M3U_Test",
+	)
+	require.NotNil(t, stream)
+
+	assert.True(t, stream.AutoLogoURL)
+	assert.Equal(t, utils.TvgLogoParser(server.URL+"/raw/discovery-channel-us.png"), stream.LogoURL)
+}
+
+func TestParseLine_AutoAssignsLogoAfterTrimmingTitleSuffixes(t *testing.T) {
+	cleanup := setupTestEnvironment(t)
+	defer cleanup()
+
+	server := newAutoChannelIconsTestServer(t)
+	useAutoChannelIconsTestServer(t, server)
+	t.Setenv("AUTO_RETRIEVE_CHANNEL_ICONS", "true")
+
+	stream := parseLine(
+		`#EXTINF:-1 tvg-id="cnn.us" tvg-name="CNN US HD",CNN US HD`,
+		&LineDetails{Content: "http://example.com/cnn", LineNum: 1},
+		"M3U_Test",
+	)
+	require.NotNil(t, stream)
+
+	assert.True(t, stream.AutoLogoURL)
+	assert.Equal(t, utils.TvgLogoParser(server.URL+"/raw/cnn-us.png"), stream.LogoURL)
+}
+
+func TestFormatStreamEntry_UsesSourceURLWhenDirectSourceProxyingEnabled(t *testing.T) {
+	t.Setenv("DIRECT_SOURCE_PROXYING", "true")
+
+	stream := &StreamInfo{
+		Title:     "Discovery Channel",
+		SourceURL: "http://example-source.test/discovery",
+		URLs:      xsync.NewMapOf[string, map[string]string](),
+	}
+	stream.URLs.Store("1", map[string]string{
+		"hash": "1:::http://example-source.test/discovery",
+	})
+
+	entry := formatStreamEntry("http://proxy.example.com", stream)
+	assert.Contains(t, entry, "\nhttp://example-source.test/discovery\n")
+	assert.NotContains(t, entry, "http://proxy.example.com/p/")
+}
+
+func TestMergeStreamInfoAttributes_PrefersSourceLogoOverAutoRetrievedLogo(t *testing.T) {
+	cleanup := setupTestEnvironment(t)
+	defer cleanup()
+
+	server := newAutoChannelIconsTestServer(t)
+	useAutoChannelIconsTestServer(t, server)
+	t.Setenv("AUTO_RETRIEVE_CHANNEL_ICONS", "true")
+
+	autoStream := parseLine(
+		`#EXTINF:-1 tvg-id="fox.us" tvg-name="FOX US",FOX US`,
+		&LineDetails{Content: "http://example.com/fox-auto", LineNum: 1},
+		"M3U_Test",
+	)
+	require.NotNil(t, autoStream)
+	require.True(t, autoStream.AutoLogoURL)
+
+	sourceLogoStream := parseLine(
+		`#EXTINF:-1 tvg-id="fox.us" tvg-name="FOX US" tvg-logo="http://logo/fox-source.png",FOX US`,
+		&LineDetails{Content: "http://example.com/fox-source", LineNum: 2},
+		"M3U_Test",
+	)
+	require.NotNil(t, sourceLogoStream)
+	require.False(t, sourceLogoStream.AutoLogoURL)
+
+	merged := mergeStreamInfoAttributes(autoStream, sourceLogoStream)
+	assert.False(t, merged.AutoLogoURL)
+	assert.Equal(t, utils.TvgLogoParser("http://logo/fox-source.png"), merged.LogoURL)
+}
+
+func TestProcessorRun_EmbedsEPGURLInPlaylistHeader(t *testing.T) {
+	cleanup := setupTestEnvironment(t)
+	defer cleanup()
+
+	t.Setenv("EMBEDDED_EPG_URL", "https://epg.example.com/guide.xml.gz")
+
+	processor := NewProcessor()
+	require.NotNil(t, processor)
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com", nil)
+	require.NoError(t, processor.Run(context.Background(), req))
+
+	content, err := os.ReadFile(processor.GetResultPath())
+	require.NoError(t, err)
+
+	lines := strings.SplitN(string(content), "\n", 2)
+	require.NotEmpty(t, lines)
+	assert.Equal(
+		t,
+		`#EXTM3U x-tvg-url="https://epg.example.com/guide.xml.gz" url-tvg="https://epg.example.com/guide.xml.gz"`,
+		lines[0],
+	)
+}
+
+func TestProcessorRun_IgnoresInvalidEmbeddedEPGURL(t *testing.T) {
+	cleanup := setupTestEnvironment(t)
+	defer cleanup()
+
+	t.Setenv("EMBEDDED_EPG_URL", "not-a-valid-url")
+
+	processor := NewProcessor()
+	require.NotNil(t, processor)
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com", nil)
+	require.NoError(t, processor.Run(context.Background(), req))
+
+	content, err := os.ReadFile(processor.GetResultPath())
+	require.NoError(t, err)
+
+	lines := strings.SplitN(string(content), "\n", 2)
+	require.NotEmpty(t, lines)
+	assert.Equal(t, "#EXTM3U", lines[0])
 }
 
 func TestSortingManager_DedupesCanonicalChannelAcrossCaseAndSpacing(t *testing.T) {

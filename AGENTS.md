@@ -1,51 +1,41 @@
 # AGENTS
 
-## Overview
+## Purpose
 - This repo is a Go IPTV proxy/playlist merger with a bundled Windows desktop controller in `windows-app/`.
-- The Go server is configured from environment variables at process start.
-- The Windows desktop app owns the user-facing settings UX, persists settings to JSON, and translates those settings into env vars before launching the server.
+- `main.go` wires the HTTP handlers, updater, and discovery-backed API endpoints.
+- Keep this file focused on coding constraints and architecture. Put end-user detail and long runbooks in `README.md` or `docs/troubleshooting/`.
 
-## Key Runtime Flow
-- `main.go` starts HTTP handlers and the background updater.
-- `updater/updater.go` owns scheduled refreshes and now also initializes web discovery jobs.
-- `sourceproc/` downloads source playlists, parses streams, applies filters, and writes the merged playlist plus slug mappings.
-- `proxy/` handles stream playback, balancing, retries, and buffer coordination.
+## Runtime Shape
+- `updater/` schedules source refreshes and initializes the discovery manager.
+- `sourceproc/` downloads source playlists, parses/filters streams, and writes the merged playlist plus slug data.
+- `proxy/` owns source selection, failover, buffering, and playback proxying.
+- `windows-app/gui_app.py` is the desktop UI entry point. It persists settings to `%LOCALAPPDATA%\\WindowsM3UStreamMergerProxyDesktop\\settings.json` and translates them into env vars before launching or restarting the server.
 
-## Source Configuration Model
-- Static playlist sources still come from `M3U_URL_*` and `M3U_MAX_CONCURRENCY_*`.
-- Dynamic web-discovered playlists are injected at runtime through `utils.SourceConfig` and `utils.SetDynamicSources(...)`.
-- Source indexing logic now lives in `utils/env.go`; avoid bypassing it with direct env scans when adding new source-aware code.
+## Source Configuration
+- Static sources come from `M3U_URL_<n>`, `M3U_MAX_CONCURRENCY_<n>`, and `M3U_CONTAINS_VOD_<n>`.
+- Dynamic discovery sources are runtime `utils.SourceConfig` entries published through `utils.SetDynamicSources(...)`.
+- Do not add new source-aware logic by scanning env vars directly. Use `utils.GetSourceConfigs()`, `utils.GetM3UIndexes()`, and `utils.GetSourceConfig()` from `utils/env.go`.
+- Discovery jobs arrive as `DISCOVERY_JOB_<n>` JSON payloads and are converted into dynamic sources by `discovery/`.
+- Discovery is HTTP crawler/parser based, not browser automation based.
+
+## Important Behaviors
+- With `SHARED_BUFFER=false`, M3U8 playback uses playlist passthrough and `/segment/...` proxying instead of media-byte stitching. Preserve this behavior when touching HLS paths.
+- Load balancing and retries should only consider source indexes that actually exist for the decoded stream. Preserve detailed failure diagnostics, including stream ID, source index, candidate subindex, URL, and failure cause.
+- Outbound HTTP includes DNS fallback logic in `utils/http.go`; preserve `FALLBACK_DNS_SERVERS` support and lookup/fetch error detail.
+- On Windows, slug publish/read logic must tolerate directory rename/remove failures; keep the existing fallback behavior intact.
 
 ## Desktop App Notes
-- Main desktop UI entry point: `windows-app/gui_app.py`.
-- Settings persistence is in `%LOCALAPPDATA%\\WindowsM3UStreamMergerProxyDesktop\\settings.json`.
-- Popup-style editors already exist in this file; follow those patterns for new configuration surfaces.
-- The new Web Discovery popup persists immediately and restarts the server only if it is already running.
+- Reuse the existing popup/editor patterns in `windows-app/gui_app.py` for new settings surfaces.
+- Web discovery settings are persisted on save and restart the server only if it is already running.
+- The discovered-sources management UI talks to `/api/discovery/sources`; keep desktop and backend behavior aligned.
 
-## Web Discovery Feature
-- Backend package: `discovery/`.
-- Jobs are passed from the desktop app via `DISCOVERY_JOB_<n>` JSON payloads.
-- Discovery is HTTP-parser based, not browser-automation based.
-- The crawler can:
-  - seed from the configured page
-  - follow same-site links recursively
-  - read `robots.txt`
-  - read sitemap XML files
-  - validate discovered playlists by checking for `#EXTM3U`
-- Discovery changes trigger a playlist rebuild through the updater callback.
-
-## Streaming Reliability Notes (Critical)
-- **HLS with `SHARED_BUFFER=false`:** discovered `.m3u8` sources must use playlist passthrough (`M3U8Processor`) rather than media-byte stitching. This matches direct-player behavior and avoids Android TV incompatibilities seen in the old path.
-- **Load balancer source filtering:** when selecting stream URLs, only evaluate source indexes that actually exist for the decoded slug stream. Avoid retrying indexes that are absent/empty in `stream.URLs`.
-- **Windows Server 2012 R2 DNS behavior:** upstream lookups can intermittently fail with `getaddrinfow` temporary errors. Outbound HTTP now includes DNS fallback dialing logic in `utils/http.go`.
-- **Fallback DNS config:** `FALLBACK_DNS_SERVERS` can be used to set explicit DNS resolvers (comma-separated, port optional). Defaults to `1.1.1.1:53,8.8.8.8:53`.
-- **Slug publish/read robustness:** on Windows Server, directory rename/remove can fail for slug folders. Slug publish uses file-level sync fallback and decode checks both `slugs` and `new-slugs`.
-- **Diagnostics expectation:** load balancer errors should include stream ID, source index, candidate subindex, URL, and specific failure cause (fetch timeout, DNS lookup failure, HTTP status, etc.). Preserve this detail when changing error handling.
-- **Runbook:** follow `docs/troubleshooting/windows-server-2012r2.md` for incident triage and host validation steps.
-- **Android playback tuning:** follow `docs/troubleshooting/android-client-compatibility.md` when VLC works but Android/Android TV clients fail.
-
-## Testing Notes
-- Fast package verification that currently passes:
+## Verification
+- Fast suite:
   - `go test ./config ./handlers ./logger ./proxy/... ./sourceproc ./store ./updater ./utils ./discovery`
   - `python -m py_compile windows-app/gui_app.py`
-- The root-package `go test` can run much longer because of integration coverage; treat it separately from the fast package suite.
+- Root `go test` is slower and closer to integration coverage; treat it separately.
+
+## References
+- `README.md` for product behavior and env vars.
+- `docs/troubleshooting/windows-server-2012r2.md`
+- `docs/troubleshooting/android-client-compatibility.md`

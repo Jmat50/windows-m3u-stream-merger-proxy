@@ -1,12 +1,15 @@
 package handlers
 
 import (
+	"bufio"
+	"io"
 	"net/http"
 	"os"
 	"strings"
 	"time"
 
 	"windows-m3u-stream-merger-proxy/logger"
+	"windows-m3u-stream-merger-proxy/utils"
 )
 
 type M3UHTTPHandler struct {
@@ -38,7 +41,56 @@ func (h *M3UHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	http.ServeFile(w, r, h.processedPath)
+	if err := h.servePlaylist(w, r); err != nil {
+		if os.IsNotExist(err) {
+			http.Error(w, "No processed M3U found.", http.StatusNotFound)
+			return
+		}
+		h.logger.Errorf("Failed to serve playlist %s: %v", h.processedPath, err)
+		http.Error(w, "Could not serve processed M3U.", http.StatusInternalServerError)
+	}
+}
+
+func (h *M3UHTTPHandler) servePlaylist(w http.ResponseWriter, r *http.Request) error {
+	file, err := os.Open(h.processedPath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	if r.Method == http.MethodHead {
+		return nil
+	}
+
+	reader := bufio.NewReader(file)
+	firstLine, readErr := reader.ReadString('\n')
+	if readErr != nil && readErr != io.EOF {
+		return readErr
+	}
+
+	headerLine := utils.BuildPlaylistHeaderLine()
+	if _, err := io.WriteString(w, headerLine); err != nil {
+		return err
+	}
+
+	if firstLine != "" && !isEXTM3UHeaderLine(firstLine) {
+		if _, err := io.WriteString(w, firstLine); err != nil {
+			return err
+		}
+	}
+
+	if readErr == io.EOF {
+		return nil
+	}
+
+	_, err = io.Copy(w, reader)
+	return err
+}
+
+func isEXTM3UHeaderLine(line string) bool {
+	trimmed := strings.TrimSpace(strings.TrimPrefix(line, "\ufeff"))
+	return strings.HasPrefix(trimmed, "#EXTM3U")
 }
 
 func (h *M3UHTTPHandler) handleAuth(r *http.Request) bool {
@@ -81,4 +133,3 @@ func (h *M3UHTTPHandler) parseCredentials(raw string) [][]string {
 	}
 	return result
 }
-

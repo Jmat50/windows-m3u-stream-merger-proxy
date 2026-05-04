@@ -88,6 +88,8 @@ func parseLine(line string, nextLine *LineDetails, m3uIndex string) *StreamInfo 
 		return nil
 	}
 
+	maybeApplyAutoChannelIcon(stream)
+
 	indexStreamURL(stream, m3uIndex, nextLine.LineNum, cleanUrl)
 
 	return stream
@@ -167,8 +169,13 @@ func formatStreamEntry(baseURL string, stream *StreamInfo) string {
 		extInfTags = append(extInfTags, fmt.Sprintf("tvg-name=\"%s\"", stream.Title))
 	}
 
+	streamURL := GenerateStreamURL(baseURL, stream)
+	if directSourceProxyingEnabled() && strings.TrimSpace(stream.SourceURL) != "" {
+		streamURL = strings.TrimSpace(stream.SourceURL)
+	}
+
 	entry.WriteString(fmt.Sprintf("%s,%s\n", strings.Join(extInfTags, " "), stream.Title))
-	entry.WriteString(GenerateStreamURL(baseURL, stream))
+	entry.WriteString(streamURL)
 	entry.WriteString("\n")
 
 	return entry.String()

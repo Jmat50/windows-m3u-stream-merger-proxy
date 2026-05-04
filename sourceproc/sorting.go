@@ -3,13 +3,13 @@ package sourceproc
 import (
 	"encoding/json"
 	"fmt"
-	"windows-m3u-stream-merger-proxy/config"
-	"windows-m3u-stream-merger-proxy/logger"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"windows-m3u-stream-merger-proxy/config"
+	"windows-m3u-stream-merger-proxy/logger"
 
 	"github.com/cespare/xxhash"
 	"github.com/puzpuzpuz/xsync/v3"
@@ -288,6 +288,10 @@ func mergeStreamInfoAttributes(base, new *StreamInfo) *StreamInfo {
 	}
 	if base.LogoURL == "" {
 		base.LogoURL = new.LogoURL
+		base.AutoLogoURL = new.AutoLogoURL
+	} else if base.AutoLogoURL && !new.AutoLogoURL && new.LogoURL != "" {
+		base.LogoURL = new.LogoURL
+		base.AutoLogoURL = false
 	}
 	if base.Group == "" {
 		base.Group = new.Group
@@ -359,4 +363,3 @@ func compareNumeric(a, b string) int {
 
 	return strings.Compare(a, b)
 }
-

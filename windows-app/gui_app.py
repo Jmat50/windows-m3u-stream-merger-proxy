@@ -58,6 +58,10 @@ DEFAULT_SETTINGS = {
     "max_retries": "5",
     "retry_wait": "0",
     "stream_timeout": "7",
+    "auto_retrieve_channel_icons": False,
+    "direct_source_proxying": False,
+    "embedded_epg_enabled": False,
+    "embedded_epg_url": "",
     "start_on_boot": False,
     "sources": [],
     "include_title_filters": [],
@@ -280,12 +284,16 @@ class DesktopApp(tk.Tk):
         self.max_retries_var = tk.StringVar()
         self.retry_wait_var = tk.StringVar()
         self.stream_timeout_var = tk.StringVar()
+        self.auto_retrieve_channel_icons_var = tk.BooleanVar()
+        self.direct_source_proxying_var = tk.BooleanVar()
+        self.embedded_epg_url_var = tk.StringVar()
         self.source_name_var = tk.StringVar()
         self.source_url_var = tk.StringVar()
         self.start_on_boot_var = tk.BooleanVar()
         self.sync_on_boot_var = tk.BooleanVar()
         self.clear_on_boot_var = tk.BooleanVar()
         self.shared_buffer_var = tk.BooleanVar()
+        self.embedded_epg_enabled_var = tk.BooleanVar()
         self.status_var = tk.StringVar(value="STOPPED")
         self.status_detail_var = tk.StringVar(value="Server process is not running.")
         self.playlist_url_var = tk.StringVar(value="Playlist URL: not available")
@@ -421,7 +429,7 @@ class DesktopApp(tk.Tk):
         root = ttk.Frame(self, padding=12)
         root.pack(fill=tk.BOTH, expand=True)
 
-        for col in range(4):
+        for col in range(5):
             root.columnconfigure(col, weight=1)
         root.rowconfigure(6, weight=3)
         root.rowconfigure(9, weight=0)
@@ -465,12 +473,15 @@ class DesktopApp(tk.Tk):
         ttk.Checkbutton(root, text="Shared Buffer", variable=self.shared_buffer_var).grid(
             row=4, column=3, sticky="w", pady=(8, 0)
         )
+        ttk.Checkbutton(root, text="Direct Source Proxying", variable=self.direct_source_proxying_var).grid(
+            row=4, column=4, sticky="w", pady=(8, 0)
+        )
 
         ttk.Label(root, text="M3U Sources (order defines source index)").grid(
-            row=5, column=0, columnspan=4, sticky="w", pady=(12, 4)
+            row=5, column=0, columnspan=5, sticky="w", pady=(12, 4)
         )
         sources_frame = ttk.Frame(root)
-        sources_frame.grid(row=6, column=0, columnspan=4, sticky="nsew")
+        sources_frame.grid(row=6, column=0, columnspan=5, sticky="nsew")
         sources_frame.columnconfigure(0, weight=1, minsize=420)
         sources_frame.rowconfigure(0, weight=1)
 
@@ -553,7 +564,7 @@ class DesktopApp(tk.Tk):
         ).grid(row=1, column=1)
 
         controls = ttk.Frame(root)
-        controls.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+        controls.grid(row=7, column=0, columnspan=5, sticky="ew", pady=(10, 0))
         controls.columnconfigure(9, weight=1)
 
         ttk.Button(controls, text="Save Settings", command=self._save_settings_clicked).grid(row=0, column=0, padx=(0, 8))
@@ -572,10 +583,11 @@ class DesktopApp(tk.Tk):
         ttk.Button(controls, text="Load Backup", command=self._load_backup_clicked).grid(row=0, column=5, padx=(0, 8))
         ttk.Button(controls, text="Open Playlist", command=self._open_playlist_clicked).grid(row=0, column=6, padx=(0, 8))
         ttk.Button(controls, text="Open Data Folder", command=self._open_data_folder_clicked).grid(row=0, column=7, padx=(0, 8))
-        ttk.Button(controls, text="Error Log", command=self._open_error_log_clicked).grid(row=0, column=8)
+        ttk.Button(controls, text="Error Log", command=self._open_error_log_clicked).grid(row=0, column=8, padx=(0, 8))
+        ttk.Button(controls, text="Embedded EPGs", command=self._open_embedded_epg_popup).grid(row=0, column=9)
 
         status_frame = ttk.LabelFrame(root, text="Server Status", padding=8)
-        status_frame.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(10, 4))
+        status_frame.grid(row=8, column=0, columnspan=5, sticky="ew", pady=(10, 4))
         status_frame.columnconfigure(1, weight=1)
 
         ttk.Label(status_frame, text="State:", width=10).grid(row=0, column=0, sticky="w")
@@ -621,9 +633,9 @@ class DesktopApp(tk.Tk):
         ttk.Button(status_actions, text="Start Server", command=self._start_server_clicked).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(status_actions, text="Stop Server", command=self._stop_server_clicked).pack(side=tk.LEFT)
 
-        ttk.Label(root, text="Logs").grid(row=10, column=0, columnspan=4, sticky="w", pady=(8, 4))
+        ttk.Label(root, text="Logs").grid(row=10, column=0, columnspan=5, sticky="w", pady=(8, 4))
         logs_frame = ttk.Frame(root)
-        logs_frame.grid(row=11, column=0, columnspan=4, sticky="nsew")
+        logs_frame.grid(row=11, column=0, columnspan=5, sticky="nsew")
         logs_frame.columnconfigure(0, weight=1)
         logs_frame.rowconfigure(0, weight=1)
 
@@ -726,6 +738,14 @@ class DesktopApp(tk.Tk):
         self.max_retries_var.set(str(settings.get("max_retries", DEFAULT_SETTINGS["max_retries"])))
         self.retry_wait_var.set(str(settings.get("retry_wait", DEFAULT_SETTINGS["retry_wait"])))
         self.stream_timeout_var.set(str(settings.get("stream_timeout", DEFAULT_SETTINGS["stream_timeout"])))
+        self.auto_retrieve_channel_icons_var.set(
+            bool(settings.get("auto_retrieve_channel_icons", DEFAULT_SETTINGS["auto_retrieve_channel_icons"]))
+        )
+        self.direct_source_proxying_var.set(
+            bool(settings.get("direct_source_proxying", DEFAULT_SETTINGS["direct_source_proxying"]))
+        )
+        self.embedded_epg_enabled_var.set(bool(settings.get("embedded_epg_enabled", DEFAULT_SETTINGS["embedded_epg_enabled"])))
+        self.embedded_epg_url_var.set(str(settings.get("embedded_epg_url", DEFAULT_SETTINGS["embedded_epg_url"])).strip())
         self.start_on_boot_var.set(bool(settings.get("start_on_boot", DEFAULT_SETTINGS["start_on_boot"])))
         self.sync_on_boot_var.set(bool(settings.get("sync_on_boot", DEFAULT_SETTINGS["sync_on_boot"])))
         self.clear_on_boot_var.set(bool(settings.get("clear_on_boot", DEFAULT_SETTINGS["clear_on_boot"])))
@@ -950,6 +970,108 @@ class DesktopApp(tk.Tk):
             )
 
         return output
+
+    def _validate_embedded_epg_url(self, raw: object) -> str:
+        value = str(raw).strip()
+        if not value:
+            raise ValueError("Embedded EPG URL is required when Embedded EPGs is enabled.")
+
+        try:
+            parsed = urllib.parse.urlsplit(value)
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(f"Embedded EPG URL is invalid: {exc}") from exc
+
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("Embedded EPG URL must be a valid http or https URL.")
+
+        return value
+
+    def _open_embedded_epg_popup(self) -> None:
+        popup = tk.Toplevel(self)
+        popup.title("Embedded EPGs")
+        popup.geometry("620x260")
+        popup.minsize(560, 220)
+        popup.transient(self)
+        popup.grab_set()
+
+        enabled_var = tk.BooleanVar(value=bool(self.embedded_epg_enabled_var.get()))
+        url_var = tk.StringVar(value=self.embedded_epg_url_var.get().strip())
+
+        root = ttk.Frame(popup, padding=12)
+        root.pack(fill=tk.BOTH, expand=True)
+        root.columnconfigure(0, weight=1)
+
+        ttk.Label(
+            root,
+            text=(
+                "Embed a playlist-level XMLTV guide URL into the generated M3U header. "
+                "Existing tvg-id and tvg-name tags are preserved so players can match guide data."
+            ),
+            wraplength=580,
+            justify=tk.LEFT,
+        ).grid(row=0, column=0, sticky="ew")
+
+        form = ttk.Frame(root)
+        form.grid(row=1, column=0, sticky="ew", pady=(14, 0))
+        form.columnconfigure(1, weight=1)
+
+        ttk.Checkbutton(form, text="Embedded EPGs", variable=enabled_var).grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Label(form, text="EPG XML URL").grid(row=1, column=0, sticky="w", pady=(12, 0))
+        url_entry = ttk.Entry(form, textvariable=url_var)
+        url_entry.grid(row=1, column=1, sticky="ew", padx=(10, 0), pady=(12, 0))
+
+        ttk.Label(
+            root,
+            text=(
+                "Use a direct XMLTV URL such as .xml or .xml.gz when possible. "
+                "The playlist header will include both x-tvg-url and url-tvg for broader player compatibility."
+            ),
+            wraplength=580,
+            justify=tk.LEFT,
+            foreground="#4f4f4f",
+        ).grid(row=2, column=0, sticky="ew", pady=(12, 0))
+
+        def sync_state() -> None:
+            if enabled_var.get():
+                url_entry.state(["!disabled"])
+                if not url_var.get().strip():
+                    url_entry.focus_set()
+            else:
+                url_entry.state(["disabled"])
+
+        def save_popup_settings() -> None:
+            candidate_url = url_var.get().strip()
+            if enabled_var.get():
+                try:
+                    candidate_url = self._validate_embedded_epg_url(candidate_url)
+                except ValueError as exc:
+                    self._show_error("Invalid Embedded EPG", str(exc), parent=popup)
+                    return
+
+            self.embedded_epg_enabled_var.set(bool(enabled_var.get()))
+            self.embedded_epg_url_var.set(candidate_url)
+
+            try:
+                settings = self._collect_settings()
+                self._persist_settings(settings, sync_start_on_boot=True, show_dialogs=False, log_event=False)
+            except Exception as exc:  # noqa: BLE001
+                self._show_error("Invalid Settings", str(exc), parent=popup)
+                return
+
+            self._append_log("[APP] Embedded EPG settings saved.")
+            self._restart_server_if_running("Embedded EPG settings changed.")
+            popup.destroy()
+
+        footer = ttk.Frame(root)
+        footer.grid(row=3, column=0, sticky="e", pady=(18, 0))
+        ttk.Button(footer, text="Cancel", command=popup.destroy).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(footer, text="Save", command=save_popup_settings).pack(side=tk.LEFT)
+
+        enabled_var.trace_add("write", lambda *_args: sync_state())
+        sync_state()
+        popup.bind("<Return>", lambda _event: save_popup_settings())
+        popup.bind("<Escape>", lambda _event: popup.destroy())
+        popup.after(100, lambda: url_entry.focus_set() if enabled_var.get() else popup.focus_set())
 
     def _refresh_sources_tree(self, select_index: int | None = None) -> None:
         if not hasattr(self, "sources_tree"):
@@ -1771,6 +1893,7 @@ class DesktopApp(tk.Tk):
             merge_map[source.casefold()] = target
 
         channel_status_var = tk.StringVar(value="Click Refresh Channels to load channels from all sources.")
+        auto_retrieve_channel_icons_var = tk.BooleanVar(value=bool(self.auto_retrieve_channel_icons_var.get()))
 
         channel_row = ttk.Frame(root)
         channel_row.grid(row=0, column=0, sticky="ew")
@@ -1780,8 +1903,13 @@ class DesktopApp(tk.Tk):
             text="Channels are loaded from all sources and numbered automatically (A-Z).",
             foreground="#4f4f4f",
         ).grid(row=0, column=0, sticky="w")
+        ttk.Checkbutton(
+            channel_row,
+            text="Auto-Retrieve Channel Icons",
+            variable=auto_retrieve_channel_icons_var,
+        ).grid(row=0, column=1, sticky="e", padx=(12, 8))
         refresh_channels_button = ttk.Button(channel_row, text="Refresh Channels")
-        refresh_channels_button.grid(row=0, column=1, sticky="e")
+        refresh_channels_button.grid(row=0, column=2, sticky="e")
 
         ttk.Label(root, textvariable=channel_status_var, foreground="#4f4f4f").grid(
             row=1, column=0, sticky="w", pady=(8, 8)
@@ -2591,6 +2719,7 @@ class DesktopApp(tk.Tk):
                 for channel in sorted(exclude_channels, key=lambda v: v.casefold())
             ]
 
+            self.auto_retrieve_channel_icons_var.set(bool(auto_retrieve_channel_icons_var.get()))
             self.include_title_filters = include_patterns + include_unmapped_filters
             self.exclude_title_filters = exclude_patterns + exclude_unmapped_filters
             # Source assignment in this dialog is now automatic, so clear manual channel-source rules.
@@ -3018,6 +3147,14 @@ class DesktopApp(tk.Tk):
             "max_retries": max_retries,
             "retry_wait": retry_wait,
             "stream_timeout": stream_timeout,
+            "auto_retrieve_channel_icons": bool(self.auto_retrieve_channel_icons_var.get()),
+            "direct_source_proxying": bool(self.direct_source_proxying_var.get()),
+            "embedded_epg_enabled": bool(self.embedded_epg_enabled_var.get()),
+            "embedded_epg_url": (
+                self._validate_embedded_epg_url(self.embedded_epg_url_var.get())
+                if self.embedded_epg_enabled_var.get()
+                else self.embedded_epg_url_var.get().strip()
+            ),
             "sources": sources,
             "include_title_filters": list(self.include_title_filters),
             "exclude_title_filters": list(self.exclude_title_filters),
@@ -3597,6 +3734,9 @@ class DesktopApp(tk.Tk):
                 or key.startswith("DISCOVERED_SOURCE_CONFIG_")
             ):
                 env.pop(key, None)
+        env.pop("AUTO_RETRIEVE_CHANNEL_ICONS", None)
+        env.pop("DIRECT_SOURCE_PROXYING", None)
+        env.pop("EMBEDDED_EPG_URL", None)
 
         env["PORT"] = settings["port"]
         env["BASE_URL"] = base_url
@@ -3609,6 +3749,16 @@ class DesktopApp(tk.Tk):
         env["RETRY_WAIT"] = settings["retry_wait"]
         env["STREAM_TIMEOUT"] = settings["stream_timeout"]
         env["SHARED_BUFFER"] = _to_bool_env(settings.get("shared_buffer", DEFAULT_SETTINGS["shared_buffer"]))
+        env["AUTO_RETRIEVE_CHANNEL_ICONS"] = _to_bool_env(
+            bool(settings.get("auto_retrieve_channel_icons", DEFAULT_SETTINGS["auto_retrieve_channel_icons"]))
+        )
+        env["DIRECT_SOURCE_PROXYING"] = _to_bool_env(
+            bool(settings.get("direct_source_proxying", DEFAULT_SETTINGS["direct_source_proxying"]))
+        )
+        if bool(settings.get("embedded_epg_enabled", DEFAULT_SETTINGS["embedded_epg_enabled"])):
+            embedded_epg_url = str(settings.get("embedded_epg_url", "")).strip()
+            if embedded_epg_url:
+                env["EMBEDDED_EPG_URL"] = embedded_epg_url
         env["DATA_PATH"] = str(DATA_DIR)
         env["TEMP_PATH"] = str(TEMP_DIR)
         for index, source in enumerate(settings["sources"], start=1):
@@ -3897,6 +4047,7 @@ class DesktopApp(tk.Tk):
             "sync_on_boot": bool(self.sync_on_boot_var.get()),
             "clear_on_boot": bool(self.clear_on_boot_var.get()),
             "shared_buffer": bool(self.shared_buffer_var.get()),
+            "direct_source_proxying": bool(self.direct_source_proxying_var.get()),
             "start_on_boot": bool(self.start_on_boot_var.get()),
             "sources": safe_sources,
             "include_title_filters": list(self.include_title_filters),
