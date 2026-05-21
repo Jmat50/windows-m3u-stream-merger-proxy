@@ -70,4 +70,30 @@ func TestBuildPlaylistHeaderLine(t *testing.T) {
 			t.Fatalf("expected plain header, got %q", got)
 		}
 	})
+
+	t.Run("builds comma-separated embedded epg header", func(t *testing.T) {
+		t.Setenv(
+			"EMBEDDED_EPG_URL",
+			"https://epg1.example.com/guide.xml.gz,https://epg2.example.com/guide.xml",
+		)
+
+		got := BuildPlaylistHeaderLine()
+		want := "#EXTM3U x-tvg-url=\"https://epg1.example.com/guide.xml.gz,https://epg2.example.com/guide.xml\" " +
+			"url-tvg=\"https://epg1.example.com/guide.xml.gz,https://epg2.example.com/guide.xml\"\n"
+		if got != want {
+			t.Fatalf("expected %q, got %q", want, got)
+		}
+	})
+
+	t.Run("ignores invalid entries in comma-separated list", func(t *testing.T) {
+		t.Setenv("EMBEDDED_EPG_URL", "not-a-url,https://epg.example.com/guide.xml")
+
+		gotURL, gotOK := GetEmbeddedEPGURL()
+		if !gotOK {
+			t.Fatalf("expected valid urls to be accepted")
+		}
+		if gotURL != "https://epg.example.com/guide.xml" {
+			t.Fatalf("expected only valid url to remain, got %q", gotURL)
+		}
+	})
 }

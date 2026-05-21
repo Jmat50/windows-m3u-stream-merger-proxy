@@ -61,6 +61,7 @@ DEFAULT_SETTINGS = {
     "auto_retrieve_channel_icons": False,
     "direct_source_proxying": False,
     "embedded_epg_enabled": False,
+    "embedded_epg_urls": [],
     "embedded_epg_url": "",
     "start_on_boot": False,
     "sources": [],
@@ -286,7 +287,7 @@ class DesktopApp(tk.Tk):
         self.stream_timeout_var = tk.StringVar()
         self.auto_retrieve_channel_icons_var = tk.BooleanVar()
         self.direct_source_proxying_var = tk.BooleanVar()
-        self.embedded_epg_url_var = tk.StringVar()
+        self.embedded_epg_urls: list[str] = []
         self.source_name_var = tk.StringVar()
         self.source_url_var = tk.StringVar()
         self.start_on_boot_var = tk.BooleanVar()
@@ -717,6 +718,7 @@ class DesktopApp(tk.Tk):
             settings["channel_merge_rules"] = []
         if not isinstance(settings.get("web_discovery_jobs"), list):
             settings["web_discovery_jobs"] = []
+        settings["embedded_epg_urls"] = self._normalize_embedded_epg_urls_from_settings(settings)
 
         return settings
 
@@ -745,7 +747,7 @@ class DesktopApp(tk.Tk):
             bool(settings.get("direct_source_proxying", DEFAULT_SETTINGS["direct_source_proxying"]))
         )
         self.embedded_epg_enabled_var.set(bool(settings.get("embedded_epg_enabled", DEFAULT_SETTINGS["embedded_epg_enabled"])))
-        self.embedded_epg_url_var.set(str(settings.get("embedded_epg_url", DEFAULT_SETTINGS["embedded_epg_url"])).strip())
+        self.embedded_epg_urls = self._normalize_embedded_epg_urls_from_settings(settings)
         self.start_on_boot_var.set(bool(settings.get("start_on_boot", DEFAULT_SETTINGS["start_on_boot"])))
         self.sync_on_boot_var.set(bool(settings.get("sync_on_boot", DEFAULT_SETTINGS["sync_on_boot"])))
         self.clear_on_boot_var.set(bool(settings.get("clear_on_boot", DEFAULT_SETTINGS["clear_on_boot"])))
@@ -971,10 +973,37 @@ class DesktopApp(tk.Tk):
 
         return output
 
+    def _normalize_embedded_epg_urls_from_settings(self, settings: dict) -> list[str]:
+        urls: list[str] = []
+        seen: set[str] = set()
+
+        def append_url(raw: object) -> None:
+            value = str(raw).strip()
+            if not value:
+                return
+            key = value.casefold()
+            if key in seen:
+                return
+            seen.add(key)
+            urls.append(value)
+
+        raw_urls = settings.get("embedded_epg_urls")
+        if isinstance(raw_urls, list):
+            for item in raw_urls:
+                append_url(item)
+            if urls:
+                return urls
+
+        legacy_value = str(settings.get("embedded_epg_url", "")).strip()
+        if legacy_value:
+            for part in legacy_value.split(","):
+                append_url(part)
+        return urls
+
     def _validate_embedded_epg_url(self, raw: object) -> str:
         value = str(raw).strip()
         if not value:
-            raise ValueError("Embedded EPG URL is required when Embedded EPGs is enabled.")
+            raise ValueError("Embedded EPG URL cannot be empty.")
 
         try:
             parsed = urllib.parse.urlsplit(value)
@@ -986,70 +1015,162 @@ class DesktopApp(tk.Tk):
 
         return value
 
+    def _validate_embedded_epg_urls(self, urls: list[str], *, required: bool) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw in urls:
+            value = self._validate_embedded_epg_url(raw)
+            key = value.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(value)
+
+        if required and not normalized:
+            raise ValueError("At least one EPG URL is required when Embedded EPGs is enabled.")
+        return normalized
+
+    def _embedded_epg_env_value(self, urls: list[str]) -> str:
+        return ",".join(urls)
+
     def _open_embedded_epg_popup(self) -> None:
         popup = tk.Toplevel(self)
         popup.title("Embedded EPGs")
-        popup.geometry("620x260")
-        popup.minsize(560, 220)
+        popup.geometry("680x420")
+        popup.minsize(620, 360)
         popup.transient(self)
         popup.grab_set()
 
         enabled_var = tk.BooleanVar(value=bool(self.embedded_epg_enabled_var.get()))
-        url_var = tk.StringVar(value=self.embedded_epg_url_var.get().strip())
+        epg_urls = list(self.embedded_epg_urls)
+        new_url_var = tk.StringVar()
 
         root = ttk.Frame(popup, padding=12)
         root.pack(fill=tk.BOTH, expand=True)
         root.columnconfigure(0, weight=1)
+        root.rowconfigure(2, weight=1)
 
         ttk.Label(
             root,
             text=(
-                "Embed a playlist-level XMLTV guide URL into the generated M3U header. "
+                "Embed playlist-level XMLTV guide URLs into the generated M3U header. "
                 "Existing tvg-id and tvg-name tags are preserved so players can match guide data."
             ),
-            wraplength=580,
+            wraplength=620,
             justify=tk.LEFT,
         ).grid(row=0, column=0, sticky="ew")
 
         form = ttk.Frame(root)
         form.grid(row=1, column=0, sticky="ew", pady=(14, 0))
-        form.columnconfigure(1, weight=1)
+        form.columnconfigure(0, weight=1)
+        ttk.Checkbutton(form, text="Embedded EPGs", variable=enabled_var).grid(row=0, column=0, sticky="w")
 
-        ttk.Checkbutton(form, text="Embedded EPGs", variable=enabled_var).grid(row=0, column=0, columnspan=2, sticky="w")
-        ttk.Label(form, text="EPG XML URL").grid(row=1, column=0, sticky="w", pady=(12, 0))
-        url_entry = ttk.Entry(form, textvariable=url_var)
-        url_entry.grid(row=1, column=1, sticky="ew", padx=(10, 0), pady=(12, 0))
+        list_frame = ttk.LabelFrame(root, text="EPG XML URLs", padding=8)
+        list_frame.grid(row=2, column=0, sticky="nsew", pady=(12, 0))
+        list_frame.columnconfigure(0, weight=1)
+        list_frame.rowconfigure(0, weight=1)
+
+        url_listbox = tk.Listbox(list_frame, exportselection=False)
+        url_listbox.grid(row=0, column=0, sticky="nsew")
+        url_scroll = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=url_listbox.yview)
+        url_scroll.grid(row=0, column=1, sticky="ns")
+        url_listbox.configure(yscrollcommand=url_scroll.set)
+
+        def refresh_url_listbox(select_index: int | None = None) -> None:
+            url_listbox.delete(0, tk.END)
+            for url in epg_urls:
+                url_listbox.insert(tk.END, url)
+            if select_index is not None and 0 <= select_index < len(epg_urls):
+                url_listbox.selection_set(select_index)
+                url_listbox.activate(select_index)
+                url_listbox.see(select_index)
+
+        refresh_url_listbox()
+
+        editor = ttk.Frame(list_frame)
+        editor.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        editor.columnconfigure(0, weight=1)
+
+        new_url_entry = ttk.Entry(editor, textvariable=new_url_var)
+        new_url_entry.grid(row=0, column=0, sticky="ew")
+
+        editor_buttons = ttk.Frame(editor)
+        editor_buttons.grid(row=0, column=1, sticky="e", padx=(8, 0))
+        add_button = ttk.Button(editor_buttons, text="Add")
+        add_button.pack(side=tk.LEFT, padx=(0, 8))
+        remove_button = ttk.Button(editor_buttons, text="Remove")
+        remove_button.pack(side=tk.LEFT)
 
         ttk.Label(
             root,
             text=(
-                "Use a direct XMLTV URL such as .xml or .xml.gz when possible. "
-                "The playlist header will include both x-tvg-url and url-tvg for broader player compatibility."
+                "Use direct XMLTV URLs such as .xml or .xml.gz when possible. "
+                "Multiple sources are written comma-separated into both x-tvg-url and url-tvg "
+                "for broader IPTV player compatibility."
             ),
-            wraplength=580,
+            wraplength=620,
             justify=tk.LEFT,
             foreground="#4f4f4f",
-        ).grid(row=2, column=0, sticky="ew", pady=(12, 0))
+        ).grid(row=3, column=0, sticky="ew", pady=(12, 0))
 
         def sync_state() -> None:
-            if enabled_var.get():
-                url_entry.state(["!disabled"])
-                if not url_var.get().strip():
-                    url_entry.focus_set()
+            enabled = bool(enabled_var.get())
+            if enabled:
+                url_listbox.configure(state=tk.NORMAL)
+                new_url_entry.state(["!disabled"])
+                add_button.state(["!disabled"])
+                remove_button.state(["!disabled"])
             else:
-                url_entry.state(["disabled"])
+                url_listbox.configure(state=tk.DISABLED)
+                new_url_entry.state(["disabled"])
+                add_button.state(["disabled"])
+                remove_button.state(["disabled"])
+
+        def add_epg_url(_event: object | None = None) -> None:
+            candidate = new_url_var.get().strip()
+            if not candidate:
+                return
+            try:
+                candidate = self._validate_embedded_epg_url(candidate)
+            except ValueError as exc:
+                self._show_error("Invalid Embedded EPG", str(exc), parent=popup)
+                return
+
+            if any(existing.casefold() == candidate.casefold() for existing in epg_urls):
+                self._show_error("Invalid Embedded EPG", "That EPG URL is already in the list.", parent=popup)
+                return
+
+            epg_urls.append(candidate)
+            new_url_var.set("")
+            refresh_url_listbox(select_index=len(epg_urls) - 1)
+            new_url_entry.focus_set()
+
+        def remove_selected_epg_urls() -> None:
+            selected = list(url_listbox.curselection())
+            if not selected:
+                return
+            for index in sorted(selected, reverse=True):
+                if 0 <= index < len(epg_urls):
+                    del epg_urls[index]
+            refresh_url_listbox()
+
+        add_button.configure(command=add_epg_url)
+        remove_button.configure(command=remove_selected_epg_urls)
+        new_url_entry.bind("<Return>", add_epg_url)
 
         def save_popup_settings() -> None:
-            candidate_url = url_var.get().strip()
+            candidate_urls = list(epg_urls)
             if enabled_var.get():
                 try:
-                    candidate_url = self._validate_embedded_epg_url(candidate_url)
+                    candidate_urls = self._validate_embedded_epg_urls(candidate_urls, required=True)
                 except ValueError as exc:
                     self._show_error("Invalid Embedded EPG", str(exc), parent=popup)
                     return
+            else:
+                candidate_urls = self._validate_embedded_epg_urls(candidate_urls, required=False)
 
             self.embedded_epg_enabled_var.set(bool(enabled_var.get()))
-            self.embedded_epg_url_var.set(candidate_url)
+            self.embedded_epg_urls = candidate_urls
 
             try:
                 settings = self._collect_settings()
@@ -1063,15 +1184,14 @@ class DesktopApp(tk.Tk):
             popup.destroy()
 
         footer = ttk.Frame(root)
-        footer.grid(row=3, column=0, sticky="e", pady=(18, 0))
+        footer.grid(row=4, column=0, sticky="e", pady=(18, 0))
         ttk.Button(footer, text="Cancel", command=popup.destroy).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(footer, text="Save", command=save_popup_settings).pack(side=tk.LEFT)
 
         enabled_var.trace_add("write", lambda *_args: sync_state())
         sync_state()
-        popup.bind("<Return>", lambda _event: save_popup_settings())
         popup.bind("<Escape>", lambda _event: popup.destroy())
-        popup.after(100, lambda: url_entry.focus_set() if enabled_var.get() else popup.focus_set())
+        popup.after(100, lambda: new_url_entry.focus_set() if enabled_var.get() else popup.focus_set())
 
     def _refresh_sources_tree(self, select_index: int | None = None) -> None:
         if not hasattr(self, "sources_tree"):
@@ -3150,10 +3270,10 @@ class DesktopApp(tk.Tk):
             "auto_retrieve_channel_icons": bool(self.auto_retrieve_channel_icons_var.get()),
             "direct_source_proxying": bool(self.direct_source_proxying_var.get()),
             "embedded_epg_enabled": bool(self.embedded_epg_enabled_var.get()),
-            "embedded_epg_url": (
-                self._validate_embedded_epg_url(self.embedded_epg_url_var.get())
+            "embedded_epg_urls": (
+                self._validate_embedded_epg_urls(self.embedded_epg_urls, required=True)
                 if self.embedded_epg_enabled_var.get()
-                else self.embedded_epg_url_var.get().strip()
+                else self._validate_embedded_epg_urls(self.embedded_epg_urls, required=False)
             ),
             "sources": sources,
             "include_title_filters": list(self.include_title_filters),
@@ -3756,9 +3876,9 @@ class DesktopApp(tk.Tk):
             bool(settings.get("direct_source_proxying", DEFAULT_SETTINGS["direct_source_proxying"]))
         )
         if bool(settings.get("embedded_epg_enabled", DEFAULT_SETTINGS["embedded_epg_enabled"])):
-            embedded_epg_url = str(settings.get("embedded_epg_url", "")).strip()
-            if embedded_epg_url:
-                env["EMBEDDED_EPG_URL"] = embedded_epg_url
+            embedded_epg_urls = self._normalize_embedded_epg_urls_from_settings(settings)
+            if embedded_epg_urls:
+                env["EMBEDDED_EPG_URL"] = self._embedded_epg_env_value(embedded_epg_urls)
         env["DATA_PATH"] = str(DATA_DIR)
         env["TEMP_PATH"] = str(TEMP_DIR)
         for index, source in enumerate(settings["sources"], start=1):

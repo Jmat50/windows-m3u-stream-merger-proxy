@@ -29,8 +29,26 @@ func NormalizeEmbeddedEPGURL(raw string) (string, bool) {
 	return value, true
 }
 
+// GetEmbeddedEPGURL returns one or more validated XMLTV URLs from
+// EMBEDDED_EPG_URL. Multiple sources use the common comma-separated
+// x-tvg-url / url-tvg playlist header format.
 func GetEmbeddedEPGURL() (string, bool) {
-	return NormalizeEmbeddedEPGURL(os.Getenv("EMBEDDED_EPG_URL"))
+	raw := strings.TrimSpace(os.Getenv("EMBEDDED_EPG_URL"))
+	if raw == "" {
+		return "", false
+	}
+
+	var urls []string
+	for _, part := range strings.Split(raw, ",") {
+		if normalized, ok := NormalizeEmbeddedEPGURL(part); ok {
+			urls = append(urls, normalized)
+		}
+	}
+	if len(urls) == 0 {
+		return "", false
+	}
+
+	return strings.Join(urls, ","), true
 }
 
 func BuildPlaylistHeaderLine() string {
