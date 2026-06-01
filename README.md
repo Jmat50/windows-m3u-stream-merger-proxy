@@ -218,6 +218,50 @@ python -m py_compile windows-app/gui_app.py
 
 The root-package `go test` includes longer-running integration coverage and is best treated separately.
 
+## Credits
+
+This fork builds on the upstream [m3u-stream-merger-proxy](https://github.com/sonroyaalmerol/m3u-stream-merger-proxy) project by Son Roy Almerol. Thanks to the authors and maintainers of the projects below, which this repository uses directly.
+
+### Go server
+
+| Project | Repository | Role in this repo |
+| --- | --- | --- |
+| [Katana](https://github.com/projectdiscovery/katana) | `github.com/projectdiscovery/katana` | Web discovery crawler: scans sites for M3U/M3U8 URLs, follows links, and scrapes JS/XHR responses |
+| [robotstxt](https://github.com/temoto/robotstxt) | `github.com/temoto/robotstxt` | Parses `robots.txt` during web discovery |
+| [cron](https://github.com/robfig/cron) | `github.com/robfig/cron/v3` | Scheduled playlist refresh (`SYNC_CRON`) |
+| [zerolog](https://github.com/rs/zerolog) | `github.com/rs/zerolog` | Structured logging |
+| [xsync](https://github.com/puzpuzpuz/xsync) | `github.com/puzpuzpuz/xsync/v3` | Concurrent maps for sources, streams, and load balancing |
+| [go-json](https://github.com/goccy/go-json) | `github.com/goccy/go-json` | Fast JSON encoding for slug data |
+| [flock](https://github.com/gofrs/flock) | `github.com/gofrs/flock` | Cross-process file locking for source processing |
+| [uuid](https://github.com/google/uuid) | `github.com/google/uuid` | Stream session identifiers in the proxy client |
+| [compress](https://github.com/klauspost/compress) | `github.com/klauspost/compress` | Zstandard decompression for some HLS failover paths |
+| [bytebufferpool](https://github.com/valyala/bytebufferpool) | `github.com/valyala/bytebufferpool` | Buffer pooling for shared stream buffering |
+| [xxhash](https://github.com/cespare/xxhash) | `github.com/cespare/xxhash` | Fast hashing for playlist sorting keys |
+| [x/crypto](https://go.dev/x/crypto) | `golang.org/x/crypto` | SHA-3 hashing for stream slug generation |
+
+Katana also depends on libraries from [ProjectDiscovery](https://github.com/projectdiscovery) and related projects as transitive Go modules. See `go.mod` and `go.sum` for the full module graph.
+
+### Windows desktop app (build-time)
+
+| Project | Role in this repo |
+| --- | --- |
+| [PyInstaller](https://pyinstaller.org/) | Bundles `gui_app.py` and the Go server into `WindowsM3UStreamMergerProxyDesktop.exe` |
+| [pystray](https://github.com/moses-palmer/pystray) | System tray icon and menu when the window is minimized |
+| [Pillow](https://python-pillow.org/) | Tray icon image handling (used by pystray) |
+| [Tkinter](https://docs.python.org/3/library/tk.html) | Desktop UI (stdlib; ships with supported Python builds on Windows) |
+
+### Optional runtime integration
+
+| Project | Repository | Role in this repo |
+| --- | --- | --- |
+| [tv-logos](https://github.com/tv-logo/tv-logos) | `tv-logo/tv-logos` on GitHub | When `AUTO_RETRIEVE_CHANNEL_ICONS` is enabled, channel icons can be matched from this public logo dataset via the GitHub API |
+
+### Development and testing
+
+| Project | Repository | Role in this repo |
+| --- | --- | --- |
+| [testify](https://github.com/stretchr/testify) | `github.com/stretchr/testify` | Assertions in Go unit tests |
+
 ## Archive Reference
 
 `LEGACY README.txt` is preserved only as an upstream reference snapshot. If the legacy text conflicts with this README, follow this file.
