@@ -511,6 +511,7 @@ class DesktopApp(tk.Tk):
         self.sources_tree.column("concurrency", width=55, anchor=tk.CENTER, stretch=False)
         self.sources_tree.grid(row=0, column=0, sticky="nsew")
         self.sources_tree.bind("<<TreeviewSelect>>", self._on_source_tree_select)
+        self.sources_tree.bind("<Double-1>", self._on_source_tree_double_click)
         sources_scroll_y = ttk.Scrollbar(source_list_frame, orient=tk.VERTICAL, command=self.sources_tree.yview)
         sources_scroll_y.grid(row=0, column=1, sticky="ns")
         self.sources_tree.configure(yscrollcommand=sources_scroll_y.set)
@@ -1222,15 +1223,30 @@ class DesktopApp(tk.Tk):
         selected = self.sources_tree.selection()
         if not selected:
             return None
+        return self._source_index_from_tree_id(selected[0])
 
+    def _source_index_from_tree_id(self, item_id: str) -> int | None:
         try:
-            index = int(selected[0])
+            index = int(item_id)
         except ValueError:
             return None
 
         if index < 0 or index >= len(self.sources_items):
             return None
         return index
+
+    def _on_source_tree_double_click(self, event: tk.Event) -> None:
+        row_id = self.sources_tree.identify_row(event.y)
+        if not row_id:
+            return
+
+        index = self._source_index_from_tree_id(row_id)
+        if index is None:
+            return
+
+        self.sources_tree.selection_set(row_id)
+        self.sources_tree.focus(row_id)
+        self._open_add_source_dialog(edit_index=index)
 
     def _on_source_tree_select(self, event: object | None = None) -> None:
         del event
@@ -1247,9 +1263,12 @@ class DesktopApp(tk.Tk):
         for item_id in self.sources_tree.selection():
             self.sources_tree.selection_remove(item_id)
 
-    def _open_add_source_dialog(self) -> None:
+    def _open_add_source_dialog(self, edit_index: int | None = None) -> None:
+        editing = edit_index is not None and 0 <= edit_index < len(self.sources_items)
+        existing_source = self.sources_items[edit_index] if editing else {}
+
         popup = tk.Toplevel(self)
-        popup.title("Add Source")
+        popup.title("Edit Source" if editing else "Add Source")
         popup.geometry("520x260")
         popup.minsize(460, 220)
         popup.transient(self)
@@ -1260,10 +1279,15 @@ class DesktopApp(tk.Tk):
         frame.columnconfigure(0, weight=0)
         frame.columnconfigure(1, weight=1)
 
-        name_var = tk.StringVar(value=f"Source {len(self.sources_items) + 1}")
-        url_var = tk.StringVar()
-        concurrency_var = tk.StringVar(value="1")
-        contains_vod_var = tk.BooleanVar(value=True)
+        default_name = str(existing_source.get("name", "")).strip() if editing else f"Source {len(self.sources_items) + 1}"
+        default_url = str(existing_source.get("url", "")).strip() if editing else ""
+        default_concurrency = str(existing_source.get("concurrency", "1")).strip() or "1" if editing else "1"
+        default_contains_vod = bool(existing_source.get("contains_vod", True)) if editing else True
+
+        name_var = tk.StringVar(value=default_name)
+        url_var = tk.StringVar(value=default_url)
+        concurrency_var = tk.StringVar(value=default_concurrency)
+        contains_vod_var = tk.BooleanVar(value=default_contains_vod)
 
         ttk.Label(frame, text="Source Name").grid(row=0, column=0, sticky="w")
         name_entry = ttk.Entry(frame, textvariable=name_var)
@@ -1296,17 +1320,23 @@ class DesktopApp(tk.Tk):
 
         ttk.Checkbutton(frame, text="Contains VOD", variable=contains_vod_var).grid(row=4, column=0, columnspan=2, sticky="w", pady=(10, 0))
 
+        if editing:
+            helper_text = f"Editing source index {edit_index + 1}. Use up/down icons to reorder after saving."
+        else:
+            helper_text = "Source index is assigned automatically by list order.\nUse up/down icons to reorder after adding."
         ttk.Label(
             frame,
-            text="Source index is assigned automatically by list order.\nUse up/down icons to reorder after adding.",
+            text=helper_text,
             foreground="#4f4f4f",
-        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(10, 0))
 
         footer = ttk.Frame(frame)
-        footer.grid(row=5, column=0, columnspan=2, sticky="e", pady=(14, 0))
+        footer.grid(row=6, column=0, columnspan=2, sticky="e", pady=(14, 0))
 
-        def add_source_from_dialog() -> None:
-            name = name_var.get().strip() or f"Source {len(self.sources_items) + 1}"
+        def save_source_from_dialog() -> None:
+            name = name_var.get().strip() or (
+                f"Source {edit_index + 1}" if editing else f"Source {len(self.sources_items) + 1}"
+            )
             url = url_var.get().strip()
             concurrency = concurrency_var.get().strip() or "1"
             contains_vod = contains_vod_var.get()
@@ -1318,16 +1348,29 @@ class DesktopApp(tk.Tk):
                 self._show_error("Invalid Source", "Max concurrency must be a positive integer.")
                 return
 
-            self.sources_items.append({"name": name, "url": url, "concurrency": concurrency, "contains_vod": contains_vod})
-            new_index = len(self.sources_items) - 1
-            self._refresh_sources_tree(select_index=new_index)
-            self._set_last_event(f"Added source '{name}'.")
+            source_payload = {
+                "name": name,
+                "url": url,
+                "concurrency": concurrency,
+                "contains_vod": contains_vod,
+            }
+            if editing:
+                self.sources_items[edit_index] = source_payload
+                saved_index = edit_index
+                self._set_last_event(f"Updated source '{name}'.")
+            else:
+                self.sources_items.append(source_payload)
+                saved_index = len(self.sources_items) - 1
+                self._set_last_event(f"Added source '{name}'.")
+
+            self._refresh_sources_tree(select_index=saved_index)
             popup.destroy()
 
+        save_button_text = "Save Changes" if editing else "Add Source"
         ttk.Button(footer, text="Cancel", command=popup.destroy).pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Button(footer, text="Add Source", command=add_source_from_dialog).pack(side=tk.LEFT)
+        ttk.Button(footer, text=save_button_text, command=save_source_from_dialog).pack(side=tk.LEFT)
 
-        popup.bind("<Return>", lambda event: add_source_from_dialog())
+        popup.bind("<Return>", lambda event: save_source_from_dialog())
         popup.bind("<Escape>", lambda event: popup.destroy())
         name_entry.focus_set()
         name_entry.selection_range(0, tk.END)
