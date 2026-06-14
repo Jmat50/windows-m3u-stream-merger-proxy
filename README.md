@@ -254,7 +254,7 @@ Katana also depends on libraries from [ProjectDiscovery](https://github.com/proj
 
 | Project | Repository | Role in this repo |
 | --- | --- | --- |
-| [tv-logos](https://github.com/tv-logo/tv-logos) | `tv-logo/tv-logos` on GitHub | When `AUTO_RETRIEVE_CHANNEL_ICONS` is enabled, channel icons can be matched from this public logo dataset via the GitHub API |
+| [tv-logos](https://github.com/tv-logo/tv-logos) | `tv-logo/tv-logos` on GitHub | When `AUTO_RETRIEVE_CHANNEL_ICONS` is enabled, missing channel icons are matched from the bundled `tvlogos/` USA logo dataset |
 
 ### Development and testing
 

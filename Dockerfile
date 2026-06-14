@@ -33,6 +33,9 @@ WORKDIR /windows-m3u-stream-merger-proxy
 # copy in our compiled GO app
 COPY --from=build /app/windows-m3u-stream-merger-proxy /windows-m3u-stream-merger-proxy/
 
+# Bundled USA channel logos from https://github.com/tv-logo/tv-logos
+COPY --from=build /app/tvlogos /windows-m3u-stream-merger-proxy/tvlogos
+
 # Copy the entrypoint script
 COPY entrypoint.sh /windows-m3u-stream-merger-proxy/entrypoint.sh
 

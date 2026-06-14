@@ -2,7 +2,6 @@ package sourceproc
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -151,67 +150,39 @@ func parseM3UContent(content string) []testStreamInfo {
 	return streams
 }
 
-func newAutoChannelIconsTestServer(t *testing.T) *httptest.Server {
+func setupAutoChannelIconsTestLogos(t *testing.T) string {
 	t.Helper()
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/contents/countries/united-states", func(w http.ResponseWriter, r *http.Request) {
+	rootDir := t.TempDir()
+	writeTestLogoPNG := func(relativePath string) {
 		t.Helper()
-		w.Header().Set("Content-Type", "application/json")
-		require.NoError(t, json.NewEncoder(w).Encode([]map[string]string{
-			{
-				"type":         "file",
-				"name":         "discovery-channel-us.png",
-				"path":         "countries/united-states/discovery-channel-us.png",
-				"download_url": "http://" + r.Host + "/raw/discovery-channel-us.png",
-			},
-			{
-				"type":         "file",
-				"name":         "fox-us.png",
-				"path":         "countries/united-states/fox-us.png",
-				"download_url": "http://" + r.Host + "/raw/fox-us.png",
-			},
-			{
-				"type": "dir",
-				"name": "custom",
-				"path": "countries/united-states/custom",
-				"url":  "http://" + r.Host + "/contents/countries/united-states/custom",
-			},
-		}))
-	})
-	mux.HandleFunc("/contents/countries/united-states/custom", func(w http.ResponseWriter, r *http.Request) {
-		t.Helper()
-		w.Header().Set("Content-Type", "application/json")
-		require.NoError(t, json.NewEncoder(w).Encode([]map[string]string{
-			{
-				"type":         "file",
-				"name":         "cnn-us.png",
-				"path":         "countries/united-states/custom/cnn-us.png",
-				"download_url": "http://" + r.Host + "/raw/cnn-us.png",
-			},
-		}))
-	})
+		fullPath := filepath.Join(rootDir, filepath.FromSlash(relativePath))
+		require.NoError(t, os.MkdirAll(filepath.Dir(fullPath), 0755))
+		require.NoError(t, os.WriteFile(fullPath, []byte{0x89, 0x50, 0x4E, 0x47}, 0644))
+	}
 
-	server := httptest.NewServer(mux)
-	t.Cleanup(server.Close)
-	return server
-}
+	writeTestLogoPNG("countries/united-states/discovery-channel-us.png")
+	writeTestLogoPNG("countries/united-states/fox-us.png")
+	writeTestLogoPNG("countries/united-states/custom/cnn-us.png")
 
-func useAutoChannelIconsTestServer(t *testing.T, server *httptest.Server) {
-	t.Helper()
-
-	originalBaseURL := tvLogosContentsBaseURL
-	originalHTTPClient := tvLogosHTTPClient
-
-	tvLogosContentsBaseURL = server.URL + "/contents/countries/united-states"
-	tvLogosHTTPClient = server.Client()
+	utils.SetTVLogosRootOverrideForTests(rootDir)
 	autoChannelIconCache.resetForTests()
 
 	t.Cleanup(func() {
-		tvLogosContentsBaseURL = originalBaseURL
-		tvLogosHTTPClient = originalHTTPClient
+		utils.ResetTVLogosRootOverrideForTests()
 		autoChannelIconCache.resetForTests()
 	})
+
+	return rootDir
+}
+
+func expectedAutoChannelIconURL(relativePath string) string {
+	baseURL := strings.TrimRight(strings.TrimSpace(os.Getenv("BASE_URL")), "/")
+	joined, err := url.JoinPath(baseURL, "tvlogos", relativePath)
+	if err != nil {
+		return baseURL + "/tvlogos/" + relativePath
+	}
+	return utils.TvgLogoParser(joined)
 }
 
 func TestRevalidatingGetM3U(t *testing.T) {
@@ -640,8 +611,7 @@ func TestParseLine_AutoAssignsLogoFromTVLogoRepository(t *testing.T) {
 	cleanup := setupTestEnvironment(t)
 	defer cleanup()
 
-	server := newAutoChannelIconsTestServer(t)
-	useAutoChannelIconsTestServer(t, server)
+	setupAutoChannelIconsTestLogos(t)
 	t.Setenv("AUTO_RETRIEVE_CHANNEL_ICONS", "true")
 
 	stream := parseLine(
@@ -652,15 +622,14 @@ func TestParseLine_AutoAssignsLogoFromTVLogoRepository(t *testing.T) {
 	require.NotNil(t, stream)
 
 	assert.True(t, stream.AutoLogoURL)
-	assert.Equal(t, utils.TvgLogoParser(server.URL+"/raw/discovery-channel-us.png"), stream.LogoURL)
+	assert.Equal(t, expectedAutoChannelIconURL("countries/united-states/discovery-channel-us.png"), stream.LogoURL)
 }
 
 func TestParseLine_AutoAssignsLogoAfterTrimmingTitleSuffixes(t *testing.T) {
 	cleanup := setupTestEnvironment(t)
 	defer cleanup()
 
-	server := newAutoChannelIconsTestServer(t)
-	useAutoChannelIconsTestServer(t, server)
+	setupAutoChannelIconsTestLogos(t)
 	t.Setenv("AUTO_RETRIEVE_CHANNEL_ICONS", "true")
 
 	stream := parseLine(
@@ -671,7 +640,7 @@ func TestParseLine_AutoAssignsLogoAfterTrimmingTitleSuffixes(t *testing.T) {
 	require.NotNil(t, stream)
 
 	assert.True(t, stream.AutoLogoURL)
-	assert.Equal(t, utils.TvgLogoParser(server.URL+"/raw/cnn-us.png"), stream.LogoURL)
+	assert.Equal(t, expectedAutoChannelIconURL("countries/united-states/custom/cnn-us.png"), stream.LogoURL)
 }
 
 func TestFormatStreamEntry_UsesSourceURLWhenDirectSourceProxyingEnabled(t *testing.T) {
@@ -695,8 +664,7 @@ func TestMergeStreamInfoAttributes_PrefersSourceLogoOverAutoRetrievedLogo(t *tes
 	cleanup := setupTestEnvironment(t)
 	defer cleanup()
 
-	server := newAutoChannelIconsTestServer(t)
-	useAutoChannelIconsTestServer(t, server)
+	setupAutoChannelIconsTestLogos(t)
 	t.Setenv("AUTO_RETRIEVE_CHANNEL_ICONS", "true")
 
 	autoStream := parseLine(

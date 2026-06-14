@@ -86,6 +86,7 @@ Write-Host "Installing/Updating PyInstaller..."
 python -m pip install --upgrade pyinstaller pystray pillow
 
 Write-Host "Packaging GUI executable..."
+$tvLogosData = Join-Path $repoRoot "tvlogos"
 Push-Location $scriptDir
 python -m PyInstaller `
     --noconfirm `
@@ -96,6 +97,7 @@ python -m PyInstaller `
     --workpath $pyInstallerWork `
     --specpath $buildRoot `
     --add-binary "$serverExe;server" `
+    --add-data "$tvLogosData;tvlogos" `
     $guiScript
 Pop-Location
 

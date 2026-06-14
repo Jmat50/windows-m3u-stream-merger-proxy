@@ -34,6 +34,7 @@ except ImportError:
 
 APP_NAME = "Windows M3U Stream Merger Proxy Desktop"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+TV_LOGOS_DIR = PROJECT_ROOT / "tvlogos"
 CONSOLE_LOG_ARCHIVE_DIR = PROJECT_ROOT / "logs"
 APP_STATE_DIR = Path(os.getenv("LOCALAPPDATA", str(Path.home()))) / "WindowsM3UStreamMergerProxyDesktop"
 SETTINGS_FILE = APP_STATE_DIR / "settings.json"
@@ -2025,7 +2026,7 @@ class DesktopApp(tk.Tk):
         ).grid(row=0, column=0, sticky="w")
         ttk.Checkbutton(
             channel_row,
-            text="Auto-Retrieve Channel Icons",
+            text="Retrieve Missing Channel Icons",
             variable=auto_retrieve_channel_icons_var,
         ).grid(row=0, column=1, sticky="e", padx=(12, 8))
         refresh_channels_button = ttk.Button(channel_row, text="Refresh Channels")
@@ -3744,6 +3745,44 @@ class DesktopApp(tk.Tk):
 
         return destination
 
+    def _tvlogos_candidates(self) -> list[Path]:
+        meipass = getattr(sys, "_MEIPASS", None)
+        exe_dir = Path(sys.executable).resolve().parent
+        script_dir = Path(__file__).resolve().parent
+
+        search_roots: list[Path] = []
+        if meipass:
+            search_roots.append(Path(meipass))
+        search_roots.extend(
+            [
+                _resource_root(),
+                exe_dir,
+                exe_dir / "_internal",
+                script_dir,
+                script_dir.parent,
+                PROJECT_ROOT,
+                Path.cwd(),
+            ]
+        )
+
+        unique_roots: list[Path] = []
+        seen: set[str] = set()
+        for root in search_roots:
+            key = str(root.resolve()).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            unique_roots.append(root)
+
+        candidates: list[Path] = []
+        for root in unique_roots:
+            candidates.append(root / "tvlogos")
+        return candidates
+
+    def _ensure_runtime_tvlogos(self) -> Path | None:
+        candidates = self._tvlogos_candidates()
+        return next((path for path in candidates if path.is_dir()), None)
+
     def _file_sha256(self, file_path: Path) -> str | None:
         try:
             digest = hashlib.sha256()
@@ -3881,6 +3920,11 @@ class DesktopApp(tk.Tk):
                 env["EMBEDDED_EPG_URL"] = self._embedded_epg_env_value(embedded_epg_urls)
         env["DATA_PATH"] = str(DATA_DIR)
         env["TEMP_PATH"] = str(TEMP_DIR)
+        tv_logos_dir = self._ensure_runtime_tvlogos()
+        if tv_logos_dir is not None:
+            env["TV_LOGOS_DIR"] = str(tv_logos_dir)
+        else:
+            env.pop("TV_LOGOS_DIR", None)
         for index, source in enumerate(settings["sources"], start=1):
             source_url = str(source.get("url", "")).strip()
             if not source_url:

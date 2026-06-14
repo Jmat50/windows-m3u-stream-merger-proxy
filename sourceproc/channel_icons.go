@@ -1,12 +1,12 @@
 package sourceproc
 
 import (
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
+	"io/fs"
+	"net/url"
 	"os"
 	"path"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,33 +20,22 @@ import (
 const autoRetrieveChannelIconsEnv = "AUTO_RETRIEVE_CHANNEL_ICONS"
 
 var (
-	tvLogosContentsBaseURL = "https://api.github.com/repos/tv-logo/tv-logos/contents/countries/united-states"
-	tvLogosHTTPClient      = utils.HTTPClient
-	autoChannelIconCache   = &channelIconCache{}
+	autoChannelIconCache = &channelIconCache{}
 )
 
 type channelIconCache struct {
-	mu            sync.RWMutex
-	loadedBaseURL string
-	exact         map[string]channelIconCandidate
-	candidates    []channelIconCandidate
-	loadErr       error
+	mu         sync.RWMutex
+	loadedRoot string
+	exact      map[string]channelIconCandidate
+	candidates []channelIconCandidate
+	loadErr    error
 }
 
 type channelIconCandidate struct {
 	key      string
 	tokens   []string
-	url      string
 	path     string
 	priority int
-}
-
-type tvLogoDirectoryEntry struct {
-	Name        string `json:"name"`
-	Type        string `json:"type"`
-	URL         string `json:"url"`
-	Path        string `json:"path"`
-	DownloadURL string `json:"download_url"`
 }
 
 func maybeApplyAutoChannelIcon(stream *StreamInfo) {
@@ -88,7 +77,7 @@ func (c *channelIconCache) lookup(title, tvgID string) string {
 
 	for _, key := range keys {
 		if candidate, ok := c.exact[key]; ok {
-			return candidate.url
+			return localTVLogoURL(candidate.path)
 		}
 	}
 
@@ -118,14 +107,17 @@ func (c *channelIconCache) lookup(title, tvgID string) string {
 	if !found {
 		return ""
 	}
-	return best.url
+	return localTVLogoURL(best.path)
 }
 
 func (c *channelIconCache) ensureLoaded() error {
-	baseURL := strings.TrimSpace(tvLogosContentsBaseURL)
+	rootDir := utils.ResolveTVLogosRootDir()
+	if rootDir == "" {
+		return fmt.Errorf("TV logos directory not found")
+	}
 
 	c.mu.RLock()
-	if c.loadedBaseURL == baseURL && (c.exact != nil || c.loadErr != nil) {
+	if c.loadedRoot == rootDir && (c.exact != nil || c.loadErr != nil) {
 		err := c.loadErr
 		c.mu.RUnlock()
 		return err
@@ -135,17 +127,17 @@ func (c *channelIconCache) ensureLoaded() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.loadedBaseURL == baseURL && (c.exact != nil || c.loadErr != nil) {
+	if c.loadedRoot == rootDir && (c.exact != nil || c.loadErr != nil) {
 		return c.loadErr
 	}
 
-	candidates, err := fetchTVLogoCandidates(baseURL)
+	candidates, err := loadLocalTVLogoCandidates(rootDir)
 	if err != nil {
-		c.loadedBaseURL = baseURL
+		c.loadedRoot = rootDir
 		c.exact = nil
 		c.candidates = nil
 		c.loadErr = err
-		logger.Default.Warnf("Auto-retrieve channel icons lookup unavailable: %v", err)
+		logger.Default.Warnf("Retrieve missing channel icons lookup unavailable: %v", err)
 		return err
 	}
 
@@ -160,7 +152,7 @@ func (c *channelIconCache) ensureLoaded() error {
 		}
 	}
 
-	c.loadedBaseURL = baseURL
+	c.loadedRoot = rootDir
 	c.exact = exact
 	c.candidates = candidates
 	c.loadErr = nil
@@ -171,110 +163,80 @@ func (c *channelIconCache) resetForTests() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	c.loadedBaseURL = ""
+	c.loadedRoot = ""
 	c.exact = nil
 	c.candidates = nil
 	c.loadErr = nil
 }
 
-func fetchTVLogoCandidates(baseURL string) ([]channelIconCandidate, error) {
-	if strings.TrimSpace(baseURL) == "" {
-		return nil, fmt.Errorf("TV logo contents endpoint is empty")
+func loadLocalTVLogoCandidates(rootDir string) ([]channelIconCandidate, error) {
+	unitedStatesDir := filepath.Join(rootDir, "countries", "united-states")
+	scanRoot := rootDir
+	if stat, err := os.Stat(unitedStatesDir); err == nil && stat.IsDir() {
+		scanRoot = unitedStatesDir
 	}
 
-	pending := []string{baseURL}
-	seen := make(map[string]struct{}, 8)
 	candidates := make([]channelIconCandidate, 0, 256)
-
-	for len(pending) > 0 {
-		currentURL := pending[0]
-		pending = pending[1:]
-
-		if _, ok := seen[currentURL]; ok {
-			continue
+	err := filepath.WalkDir(scanRoot, func(filePath string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
 		}
-		seen[currentURL] = struct{}{}
+		if entry.IsDir() {
+			return nil
+		}
 
-		entries, err := fetchTVLogoDirectoryEntries(currentURL)
+		name := strings.TrimSpace(entry.Name())
+		if name == "" || !strings.EqualFold(path.Ext(name), ".png") {
+			return nil
+		}
+
+		relativePath, err := filepath.Rel(rootDir, filePath)
 		if err != nil {
-			return nil, err
+			return nil
+		}
+		relativePath = filepath.ToSlash(relativePath)
+
+		baseName := strings.TrimSuffix(name, path.Ext(name))
+		key := normalizeLogoCandidateKey(baseName)
+		if key == "" {
+			return nil
 		}
 
-		for _, entry := range entries {
-			switch strings.ToLower(strings.TrimSpace(entry.Type)) {
-			case "dir":
-				nextURL := strings.TrimSpace(entry.URL)
-				if nextURL != "" {
-					pending = append(pending, nextURL)
-				}
-			case "file":
-				candidate, ok := newChannelIconCandidate(entry)
-				if ok {
-					candidates = append(candidates, candidate)
-				}
-			}
-		}
+		candidates = append(candidates, channelIconCandidate{
+			key:      key,
+			tokens:   strings.Split(key, "-"),
+			path:     relativePath,
+			priority: channelIconPathPriority(relativePath),
+		})
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	if len(candidates) == 0 {
-		return nil, fmt.Errorf("no channel icon PNG files found under %s", baseURL)
+		return nil, fmt.Errorf("no channel icon PNG files found under %s", scanRoot)
 	}
 
 	return candidates, nil
 }
 
-func fetchTVLogoDirectoryEntries(apiURL string) ([]tvLogoDirectoryEntry, error) {
-	req, err := http.NewRequest(http.MethodGet, apiURL, nil)
+func localTVLogoURL(relativePath string) string {
+	baseURL := strings.TrimRight(strings.TrimSpace(os.Getenv("BASE_URL")), "/")
+	if baseURL == "" {
+		return ""
+	}
+
+	relativePath = strings.TrimPrefix(filepath.ToSlash(strings.TrimSpace(relativePath)), "/")
+	if relativePath == "" {
+		return ""
+	}
+
+	joined, err := url.JoinPath(baseURL, "tvlogos", relativePath)
 	if err != nil {
-		return nil, err
+		return baseURL + "/tvlogos/" + relativePath
 	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", "windows-m3u-stream-merger-proxy/1.0")
-
-	resp, err := tvLogosHTTPClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return nil, fmt.Errorf(
-			"TV logo contents request %s returned %s: %s",
-			apiURL,
-			resp.Status,
-			strings.TrimSpace(string(body)),
-		)
-	}
-
-	var entries []tvLogoDirectoryEntry
-	if err := json.NewDecoder(resp.Body).Decode(&entries); err != nil {
-		return nil, fmt.Errorf("decode TV logo contents response %s: %w", apiURL, err)
-	}
-
-	return entries, nil
-}
-
-func newChannelIconCandidate(entry tvLogoDirectoryEntry) (channelIconCandidate, bool) {
-	name := strings.TrimSpace(entry.Name)
-	downloadURL := strings.TrimSpace(entry.DownloadURL)
-	if name == "" || downloadURL == "" || !strings.EqualFold(path.Ext(name), ".png") {
-		return channelIconCandidate{}, false
-	}
-
-	baseName := strings.TrimSuffix(name, path.Ext(name))
-	key := normalizeLogoCandidateKey(baseName)
-	if key == "" {
-		return channelIconCandidate{}, false
-	}
-
-	return channelIconCandidate{
-		key:      key,
-		tokens:   strings.Split(key, "-"),
-		url:      downloadURL,
-		path:     strings.TrimSpace(entry.Path),
-		priority: channelIconPathPriority(entry.Path),
-	}, true
+	return joined
 }
 
 func normalizeLogoCandidateKey(raw string) string {
@@ -340,7 +302,7 @@ func normalizeChannelIconText(raw string) string {
 		"+", " plus ",
 		"@", " at ",
 		"'", "",
-		"’", "",
+		"'", "",
 		".", " ",
 		"_", " ",
 		"/", " ",
@@ -387,7 +349,7 @@ func trimTrailingNoiseTokens(tokens []string) []string {
 
 func isChannelIconNoiseToken(token string) bool {
 	switch token {
-	case "us", "usa", "hd", "sd", "uhd", "fhd", "4k", "1080p", "720p", "east", "west", "backup", "feed":
+	case "us", "usa", "hd", "sd", "uhd", "fhd", "4k", "1080p", "720p", "east", "west", "north", "south", "central", "backup", "feed":
 		return true
 	default:
 		return false
