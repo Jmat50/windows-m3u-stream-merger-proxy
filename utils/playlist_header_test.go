@@ -97,3 +97,33 @@ func TestBuildPlaylistHeaderLine(t *testing.T) {
 		}
 	})
 }
+
+func TestIsMergeEPGForSameChannelNumberEnabled(t *testing.T) {
+	t.Run("defaults to false", func(t *testing.T) {
+		t.Setenv("MERGE_EPG_FOR_SAME_CHANNEL_NUMBER", "")
+		if IsMergeEPGForSameChannelNumberEnabled() {
+			t.Fatalf("expected disabled by default")
+		}
+	})
+
+	t.Run("parses true", func(t *testing.T) {
+		t.Setenv("MERGE_EPG_FOR_SAME_CHANNEL_NUMBER", "true")
+		if !IsMergeEPGForSameChannelNumberEnabled() {
+			t.Fatalf("expected enabled")
+		}
+	})
+}
+
+func TestIsChannelEPGMergeActive(t *testing.T) {
+	t.Setenv("MERGE_EPG_FOR_SAME_CHANNEL_NUMBER", "true")
+	t.Setenv("EMBEDDED_EPG_URL", "https://epg.example.com/guide.xml")
+
+	if !IsChannelEPGMergeActive() {
+		t.Fatalf("expected active when both settings are enabled")
+	}
+
+	t.Setenv("MERGE_EPG_FOR_SAME_CHANNEL_NUMBER", "false")
+	if IsChannelEPGMergeActive() {
+		t.Fatalf("expected inactive when merge toggle is off")
+	}
+}

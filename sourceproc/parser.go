@@ -141,6 +141,8 @@ func indexStreamURL(stream *StreamInfo, m3uIndex string, sourceIndex int, cleanU
 			return oldValue, false
 		})
 	}
+
+	recordSourceEPGMeta(stream, m3uIndex, stream.TvgID)
 }
 
 // formatStreamEntry formats a stream entry for M3U output
@@ -165,8 +167,13 @@ func formatStreamEntry(baseURL string, stream *StreamInfo) string {
 	if stream.TvgType != "" {
 		extInfTags = append(extInfTags, fmt.Sprintf("tvg-type=\"%s\"", stream.TvgType))
 	}
-	if stream.Title != "" {
-		extInfTags = append(extInfTags, fmt.Sprintf("tvg-name=\"%s\"", stream.Title))
+
+	displayTitle := strings.TrimSpace(stream.DisplayTitle)
+	if displayTitle == "" {
+		displayTitle = stream.Title
+	}
+	if displayTitle != "" {
+		extInfTags = append(extInfTags, fmt.Sprintf("tvg-name=\"%s\"", displayTitle))
 	}
 
 	streamURL := GenerateStreamURL(baseURL, stream)
@@ -174,7 +181,7 @@ func formatStreamEntry(baseURL string, stream *StreamInfo) string {
 		streamURL = strings.TrimSpace(stream.SourceURL)
 	}
 
-	entry.WriteString(fmt.Sprintf("%s,%s\n", strings.Join(extInfTags, " "), stream.Title))
+	entry.WriteString(fmt.Sprintf("%s,%s\n", strings.Join(extInfTags, " "), displayTitle))
 	entry.WriteString(streamURL)
 	entry.WriteString("\n")
 

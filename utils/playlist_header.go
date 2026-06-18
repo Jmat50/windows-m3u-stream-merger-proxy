@@ -3,6 +3,7 @@ package utils
 import (
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -58,4 +59,28 @@ func BuildPlaylistHeaderLine() string {
 	}
 
 	return "#EXTM3U\n"
+}
+
+// IsMergeEPGForSameChannelNumberEnabled reports whether playlist generation should
+// share tvg-id values across channel-number groups from Channel Settings.
+func IsMergeEPGForSameChannelNumberEnabled() bool {
+	raw := strings.TrimSpace(os.Getenv("MERGE_EPG_FOR_SAME_CHANNEL_NUMBER"))
+	if raw == "" {
+		return false
+	}
+	enabled, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false
+	}
+	return enabled
+}
+
+// IsChannelEPGMergeActive is true when embedded EPG URLs are configured and the
+// merge-EPG-for-same-channel-number toggle is enabled.
+func IsChannelEPGMergeActive() bool {
+	if !IsMergeEPGForSameChannelNumberEnabled() {
+		return false
+	}
+	_, ok := GetEmbeddedEPGURL()
+	return ok
 }

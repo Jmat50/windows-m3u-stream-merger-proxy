@@ -275,15 +275,35 @@ func (p *M3UProcessor) compileM3U(baseURL string) {
 		return
 	}
 
+	var entries []*StreamInfo
 	err = p.sortingMgr.GetSortedEntries(func(entry *StreamInfo) {
-		_, writeErr := p.writer.WriteString(formatStreamEntry(baseURL, entry))
-		if writeErr != nil {
-			p.markCriticalError(writeErr)
-		}
+		entries = append(entries, entry)
 	})
 	if err != nil {
 		p.markCriticalError(err)
 		return
+	}
+
+	for _, entry := range entries {
+		restoreCompileStreamURLs(entry)
+	}
+
+	var epgIndex *EPGChannelIndex
+	groups := LoadChannelNumberGroups()
+	if utils.IsChannelEPGMergeActive() {
+		epgIndex = NewEPGChannelIndex(context.Background())
+		if len(groups) > 0 {
+			entries = expandStreamsForCompile(entries, groups, epgIndex)
+		} else {
+			entries = applyInferredMultiSourceEPG(entries, epgIndex)
+		}
+	}
+
+	for _, entry := range entries {
+		_, writeErr := p.writer.WriteString(formatStreamEntry(baseURL, entry))
+		if writeErr != nil {
+			p.markCriticalError(writeErr)
+		}
 	}
 
 	if flushErr := p.writer.Flush(); flushErr != nil {

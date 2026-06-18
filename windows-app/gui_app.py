@@ -64,6 +64,8 @@ DEFAULT_SETTINGS = {
     "embedded_epg_enabled": False,
     "embedded_epg_urls": [],
     "embedded_epg_url": "",
+    "merge_epg_for_same_channel_number": False,
+    "channel_number_groups": [],
     "start_on_boot": False,
     "sources": [],
     "include_title_filters": [],
@@ -296,6 +298,7 @@ class DesktopApp(tk.Tk):
         self.clear_on_boot_var = tk.BooleanVar()
         self.shared_buffer_var = tk.BooleanVar()
         self.embedded_epg_enabled_var = tk.BooleanVar()
+        self.merge_epg_for_same_channel_number_var = tk.BooleanVar()
         self.status_var = tk.StringVar(value="STOPPED")
         self.status_detail_var = tk.StringVar(value="Server process is not running.")
         self.playlist_url_var = tk.StringVar(value="Playlist URL: not available")
@@ -309,6 +312,7 @@ class DesktopApp(tk.Tk):
         self.exclude_title_filters: list[str] = []
         self.channel_source_rules: list[dict[str, object]] = []
         self.channel_merge_rules: list[dict[str, str]] = []
+        self.channel_number_groups: list[dict[str, object]] = []
         self.web_discovery_jobs: list[dict[str, object]] = []
         self.discovered_channels_config: list[dict[str, object]] = []
         self.sources_items: list[dict[str, object]] = []
@@ -718,6 +722,8 @@ class DesktopApp(tk.Tk):
             settings["channel_source_rules"] = []
         if not isinstance(settings.get("channel_merge_rules"), list):
             settings["channel_merge_rules"] = []
+        if not isinstance(settings.get("channel_number_groups"), list):
+            settings["channel_number_groups"] = []
         if not isinstance(settings.get("web_discovery_jobs"), list):
             settings["web_discovery_jobs"] = []
         settings["embedded_epg_urls"] = self._normalize_embedded_epg_urls_from_settings(settings)
@@ -750,6 +756,10 @@ class DesktopApp(tk.Tk):
         )
         self.embedded_epg_enabled_var.set(bool(settings.get("embedded_epg_enabled", DEFAULT_SETTINGS["embedded_epg_enabled"])))
         self.embedded_epg_urls = self._normalize_embedded_epg_urls_from_settings(settings)
+        self.merge_epg_for_same_channel_number_var.set(
+            bool(settings.get("merge_epg_for_same_channel_number", DEFAULT_SETTINGS["merge_epg_for_same_channel_number"]))
+        )
+        self.channel_number_groups = self._normalize_channel_number_groups(settings.get("channel_number_groups"))
         self.start_on_boot_var.set(bool(settings.get("start_on_boot", DEFAULT_SETTINGS["start_on_boot"])))
         self.sync_on_boot_var.set(bool(settings.get("sync_on_boot", DEFAULT_SETTINGS["sync_on_boot"])))
         self.clear_on_boot_var.set(bool(settings.get("clear_on_boot", DEFAULT_SETTINGS["clear_on_boot"])))
@@ -1044,13 +1054,14 @@ class DesktopApp(tk.Tk):
         popup.grab_set()
 
         enabled_var = tk.BooleanVar(value=bool(self.embedded_epg_enabled_var.get()))
+        merge_epg_var = tk.BooleanVar(value=bool(self.merge_epg_for_same_channel_number_var.get()))
         epg_urls = list(self.embedded_epg_urls)
         new_url_var = tk.StringVar()
 
         root = ttk.Frame(popup, padding=12)
         root.pack(fill=tk.BOTH, expand=True)
         root.columnconfigure(0, weight=1)
-        root.rowconfigure(2, weight=1)
+        root.rowconfigure(3, weight=1)
 
         ttk.Label(
             root,
@@ -1065,10 +1076,29 @@ class DesktopApp(tk.Tk):
         form = ttk.Frame(root)
         form.grid(row=1, column=0, sticky="ew", pady=(14, 0))
         form.columnconfigure(0, weight=1)
-        ttk.Checkbutton(form, text="Embedded EPGs", variable=enabled_var).grid(row=0, column=0, sticky="w")
+        form.columnconfigure(1, weight=1)
+        embedded_epg_check = ttk.Checkbutton(form, text="Embedded EPGs", variable=enabled_var)
+        embedded_epg_check.grid(row=0, column=0, sticky="w")
+        merge_epg_check = ttk.Checkbutton(
+            form,
+            text="Merge EPGs for same Channel Number",
+            variable=merge_epg_var,
+        )
+        merge_epg_check.grid(row=0, column=1, sticky="w", padx=(16, 0))
+
+        ttk.Label(
+            root,
+            text=(
+                "When enabled, channels that share a channel number in Channel Settings use the best "
+                "matching tvg-id from your embedded XMLTV guide across all sources in that group."
+            ),
+            wraplength=620,
+            justify=tk.LEFT,
+            foreground="#4f4f4f",
+        ).grid(row=2, column=0, sticky="ew", pady=(8, 0))
 
         list_frame = ttk.LabelFrame(root, text="EPG XML URLs", padding=8)
-        list_frame.grid(row=2, column=0, sticky="nsew", pady=(12, 0))
+        list_frame.grid(row=3, column=0, sticky="nsew", pady=(12, 0))
         list_frame.columnconfigure(0, weight=1)
         list_frame.rowconfigure(0, weight=1)
 
@@ -1113,16 +1143,19 @@ class DesktopApp(tk.Tk):
             wraplength=620,
             justify=tk.LEFT,
             foreground="#4f4f4f",
-        ).grid(row=3, column=0, sticky="ew", pady=(12, 0))
+        ).grid(row=4, column=0, sticky="ew", pady=(12, 0))
 
         def sync_state() -> None:
             enabled = bool(enabled_var.get())
             if enabled:
+                merge_epg_check.state(["!disabled"])
                 url_listbox.configure(state=tk.NORMAL)
                 new_url_entry.state(["!disabled"])
                 add_button.state(["!disabled"])
                 remove_button.state(["!disabled"])
             else:
+                merge_epg_check.state(["disabled"])
+                merge_epg_var.set(False)
                 url_listbox.configure(state=tk.DISABLED)
                 new_url_entry.state(["disabled"])
                 add_button.state(["disabled"])
@@ -1173,6 +1206,8 @@ class DesktopApp(tk.Tk):
 
             self.embedded_epg_enabled_var.set(bool(enabled_var.get()))
             self.embedded_epg_urls = candidate_urls
+            merge_enabled = bool(merge_epg_var.get()) if enabled_var.get() else False
+            self.merge_epg_for_same_channel_number_var.set(merge_enabled)
 
             try:
                 settings = self._collect_settings()
@@ -1186,7 +1221,7 @@ class DesktopApp(tk.Tk):
             popup.destroy()
 
         footer = ttk.Frame(root)
-        footer.grid(row=4, column=0, sticky="e", pady=(18, 0))
+        footer.grid(row=5, column=0, sticky="e", pady=(18, 0))
         ttk.Button(footer, text="Cancel", command=popup.destroy).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(footer, text="Save", command=save_popup_settings).pack(side=tk.LEFT)
 
@@ -1838,6 +1873,112 @@ class DesktopApp(tk.Tk):
             output.append({"pattern": pattern, "sources": sources})
 
         return output
+
+    def _normalize_channel_number_groups(self, value: object) -> list[dict[str, object]]:
+        if not isinstance(value, list):
+            return []
+
+        output: list[dict[str, object]] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+
+            canonical = str(item.get("canonical", "")).strip()
+            if not canonical:
+                continue
+
+            number_raw = item.get("number", 0)
+            try:
+                number = int(number_raw)
+            except (TypeError, ValueError):
+                continue
+            if number < 1:
+                continue
+
+            raw_entries = item.get("entries", [])
+            if not isinstance(raw_entries, list):
+                continue
+
+            entries: list[dict[str, object]] = []
+            for entry in raw_entries:
+                if not isinstance(entry, dict):
+                    continue
+                channel_title = str(entry.get("channel_title", "")).strip()
+                sub_number = str(entry.get("sub_number", "")).strip()
+                source_name = str(entry.get("source_name", "")).strip()
+                try:
+                    source_index = int(entry.get("source_index", 0))
+                except (TypeError, ValueError):
+                    continue
+                if source_index < 1 or not channel_title or not sub_number:
+                    continue
+                entries.append(
+                    {
+                        "source_index": source_index,
+                        "source_name": source_name,
+                        "channel_title": channel_title,
+                        "sub_number": sub_number,
+                    }
+                )
+
+            if not entries:
+                continue
+
+            output.append({"number": number, "canonical": canonical, "entries": entries})
+
+        return output
+
+    def _build_channel_number_groups(
+        self,
+        parent_channels: list[str],
+        channel_source_assignments: Callable[[str], list[tuple[str, str]]],
+    ) -> list[dict[str, object]]:
+        groups: list[dict[str, object]] = []
+        for number, parent_channel in enumerate(sorted(parent_channels, key=lambda value: value.casefold()), start=1):
+            assignments = channel_source_assignments(parent_channel)
+            if len(assignments) < 2:
+                continue
+
+            source_priority = {
+                str(source.get("name", "")).strip().casefold(): index
+                for index, source in enumerate(self.sources_items, start=1)
+                if str(source.get("name", "")).strip()
+            }
+
+            entries: list[dict[str, object]] = []
+            for child_index, (child_channel, source_name) in enumerate(assignments, start=1):
+                source_key = source_name.strip().casefold()
+                source_index = source_priority.get(source_key)
+                if source_index is None:
+                    for index, source in enumerate(self.sources_items, start=1):
+                        default_name = str(source.get("name", "")).strip() or f"Source {index}"
+                        if default_name.casefold() == source_key:
+                            source_index = index
+                            break
+                if source_index is None:
+                    continue
+
+                entries.append(
+                    {
+                        "source_index": source_index,
+                        "source_name": source_name.strip() or f"Source {source_index}",
+                        "channel_title": child_channel.strip() or parent_channel.strip(),
+                        "sub_number": f"{number}.{child_index}",
+                    }
+                )
+
+            if len(entries) < 2:
+                continue
+
+            groups.append(
+                {
+                    "number": number,
+                    "canonical": parent_channel.strip(),
+                    "entries": entries,
+                }
+            )
+
+        return groups
 
     def _normalize_channel_merge_rules(self, value: object) -> list[dict[str, str]]:
         if not isinstance(value, list):
@@ -2913,6 +3054,10 @@ class DesktopApp(tk.Tk):
                 preserved_merge_rules.append({"source": source, "target": target})
 
             self.channel_merge_rules = self._normalize_channel_merge_rules(merge_rules + preserved_merge_rules)
+            self.channel_number_groups = self._build_channel_number_groups(
+                include_channels,
+                channel_source_assignments,
+            )
 
             try:
                 settings = self._collect_settings()
@@ -3319,6 +3464,12 @@ class DesktopApp(tk.Tk):
                 if self.embedded_epg_enabled_var.get()
                 else self._validate_embedded_epg_urls(self.embedded_epg_urls, required=False)
             ),
+            "merge_epg_for_same_channel_number": (
+                bool(self.merge_epg_for_same_channel_number_var.get())
+                if self.embedded_epg_enabled_var.get()
+                else False
+            ),
+            "channel_number_groups": list(self.channel_number_groups),
             "sources": sources,
             "include_title_filters": list(self.include_title_filters),
             "exclude_title_filters": list(self.exclude_title_filters),
@@ -3932,6 +4083,7 @@ class DesktopApp(tk.Tk):
                 or key.startswith("EXCLUDE_TITLE_")
                 or key.startswith("CHANNEL_SOURCES_")
                 or key.startswith("CHANNEL_MERGE_")
+                or key.startswith("CHANNEL_NUMBER_GROUP_")
                 or key.startswith("DISCOVERY_JOB_")
                 or key.startswith("DISCOVERED_SOURCE_CONFIG_")
             ):
@@ -3939,6 +4091,7 @@ class DesktopApp(tk.Tk):
         env.pop("AUTO_RETRIEVE_CHANNEL_ICONS", None)
         env.pop("DIRECT_SOURCE_PROXYING", None)
         env.pop("EMBEDDED_EPG_URL", None)
+        env.pop("MERGE_EPG_FOR_SAME_CHANNEL_NUMBER", None)
 
         env["PORT"] = settings["port"]
         env["BASE_URL"] = base_url
@@ -3961,6 +4114,10 @@ class DesktopApp(tk.Tk):
             embedded_epg_urls = self._normalize_embedded_epg_urls_from_settings(settings)
             if embedded_epg_urls:
                 env["EMBEDDED_EPG_URL"] = self._embedded_epg_env_value(embedded_epg_urls)
+        env["MERGE_EPG_FOR_SAME_CHANNEL_NUMBER"] = _to_bool_env(
+            bool(settings.get("merge_epg_for_same_channel_number", DEFAULT_SETTINGS["merge_epg_for_same_channel_number"]))
+            and bool(settings.get("embedded_epg_enabled", DEFAULT_SETTINGS["embedded_epg_enabled"]))
+        )
         env["DATA_PATH"] = str(DATA_DIR)
         env["TEMP_PATH"] = str(TEMP_DIR)
         tv_logos_dir = self._ensure_runtime_tvlogos()
@@ -4034,6 +4191,12 @@ class DesktopApp(tk.Tk):
 
         for index, rule in enumerate(channel_merge_rules, start=1):
             env[f"CHANNEL_MERGE_{index}"] = f"{rule['source']}|{rule['target']}"
+
+        for index, group in enumerate(
+            self._normalize_channel_number_groups(settings.get("channel_number_groups", [])),
+            start=1,
+        ):
+            env[f"CHANNEL_NUMBER_GROUP_{index}"] = json.dumps(group, separators=(",", ":"), sort_keys=True)
 
         for index, job in enumerate(settings.get("web_discovery_jobs", []), start=1):
             payload = self._normalize_web_discovery_jobs([job])

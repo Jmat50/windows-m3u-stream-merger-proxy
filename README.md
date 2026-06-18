@@ -144,6 +144,7 @@ Discovery jobs can:
 | `INCLUDE_TITLE_<n>` / `EXCLUDE_TITLE_<n>` | Regex filters for channel titles. |
 | `CHANNEL_SOURCES_<n>` | Restrict matching titles to specific source indexes using `pattern|1,2,3`. |
 | `CHANNEL_MERGE_<n>` | Merge channel titles using `source|target`. |
+| `CHANNEL_NUMBER_GROUP_<n>` | JSON channel-number group from Channel Settings. Used when merge-EPG sharing is enabled. |
 | `TITLE_SUBSTR_FILTER` | Regex used to strip substrings from output titles. |
 | `SORTING_KEY` | Sort by `title`, `tvg-id`, `tvg-chno`, `tvg-group`, `tvg-type`, or `source`. |
 | `SORTING_DIRECTION` | `asc` or `desc`. |
@@ -161,6 +162,45 @@ Discovery jobs can:
 | `DEBUG` | Enables debug logging. |
 | `SAFE_LOGS` | Redacts URLs from logs for safer sharing. |
 | `FALLBACK_DNS_SERVERS` | Optional DNS fallback list for outbound HTTP lookups (`ip[:port],ip[:port]`). Defaults: `1.1.1.1:53,8.8.8.8:53`. |
+
+### Embedded EPG and Channel Guide Matching
+
+The server does not generate or host XMLTV data. It embeds external guide URLs in the merged playlist header and writes per-channel `tvg-id` / `tvg-name` tags so IPTV players can match guide entries client-side.
+
+| Variable | Purpose |
+| --- | --- |
+| `EMBEDDED_EPG_URL` | Comma-separated XMLTV URLs written into the generated M3U header (`x-tvg-url` / `url-tvg`). |
+| `MERGE_EPG_FOR_SAME_CHANNEL_NUMBER` | When `true` and embedded EPG is configured, multi-source channels can share the best matching `tvg-id` from the embedded XMLTV guide. Desktop UI: **Merge EPGs for same Channel Number** in the Embedded EPGs popup. |
+| `CHANNEL_NUMBER_GROUP_<n>` | JSON channel-number group saved from Channel Settings. Required for separate sub-channel playlist rows such as `64.1` and `64.2`. |
+
+#### Desktop setup
+
+1. Open **Embedded EPGs**, enable embedded EPG, add one or more XMLTV URLs (`.xml` or `.xml.gz`), and check **Merge EPGs for same Channel Number** if you want shared guide matching across sources for the same channel number.
+2. Open **Channel Settings** and click **Save**. This publishes channel-number groups for channels that have multiple source contributors (for example `64.1` / `64.2` in the numbering tree).
+3. Restart the server if it is already running so env changes apply.
+
+#### Runtime behavior
+
+- With merge EPG enabled, the processor fetches configured XMLTV URLs at compile time and builds a channel-id index. For each multi-source channel group, it picks the `tvg-id` that matches the guide (preferring lower source index when multiple match).
+- When a channel-number group has two or more source entries, the merged playlist emits separate rows per source with shared `tvg-id`, distinct `tvg-chno` values (`64.1`, `64.2`), and source-specific playback URLs.
+- Works with **Direct Source Proxying** enabled: each sub-channel row uses that source's direct URL in the playlist.
+- If merge EPG is enabled but Channel Settings groups have not been saved yet, multi-source channels still get the best shared `tvg-id` on a single merged row.
+- If merge EPG is disabled, existing first-wins `tvg-id` merge behavior is unchanged.
+
+`CHANNEL_NUMBER_GROUP_<n>` JSON shape:
+
+```json
+{
+  "number": 64,
+  "canonical": "Game Show Network",
+  "entries": [
+    {"source_index": 1, "source_name": "GSN", "channel_title": "Game Show Network", "sub_number": "64.1"},
+    {"source_index": 2, "source_name": "s.id", "channel_title": "Game Show Network", "sub_number": "64.2"}
+  ]
+}
+```
+
+Channel number groups are saved automatically from Channel Settings when a visible channel has multiple source contributors.
 
 ## Notes for Contributors
 

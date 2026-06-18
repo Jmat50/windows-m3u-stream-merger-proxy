@@ -297,6 +297,8 @@ func mergeStreamInfoAttributes(base, new *StreamInfo) *StreamInfo {
 		base.Group = new.Group
 	}
 
+	mergeSourceEPGMeta(base, new)
+
 	if base.URLs == nil {
 		base.URLs = xsync.NewMapOf[string, map[string]string]()
 	}
@@ -323,6 +325,33 @@ func mergeStreamInfoAttributes(base, new *StreamInfo) *StreamInfo {
 	}
 
 	return base
+}
+
+func mergeSourceEPGMeta(base, new *StreamInfo) {
+	recordSourceEPGMeta(base, base.SourceM3U, base.TvgID)
+	recordSourceEPGMeta(base, new.SourceM3U, new.TvgID)
+
+	if new.SourceEPGMeta == nil {
+		return
+	}
+	if base.SourceEPGMeta == nil {
+		base.SourceEPGMeta = make(map[string]SourceEPGMeta, len(new.SourceEPGMeta))
+	}
+	for sourceIndex, meta := range new.SourceEPGMeta {
+		recordSourceEPGMeta(base, sourceIndex, meta.TvgID)
+	}
+}
+
+func recordSourceEPGMeta(stream *StreamInfo, sourceM3U, tvgID string) {
+	sourceM3U = strings.TrimSpace(sourceM3U)
+	tvgID = strings.TrimSpace(tvgID)
+	if stream == nil || sourceM3U == "" || tvgID == "" {
+		return
+	}
+	if stream.SourceEPGMeta == nil {
+		stream.SourceEPGMeta = make(map[string]SourceEPGMeta)
+	}
+	stream.SourceEPGMeta[sourceM3U] = SourceEPGMeta{TvgID: tvgID}
 }
 
 func sanitizeField(value string) string {

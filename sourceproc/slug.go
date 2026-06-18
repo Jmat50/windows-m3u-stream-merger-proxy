@@ -14,8 +14,18 @@ import (
 	"golang.org/x/crypto/sha3"
 )
 
+func slugInputKey(stream *StreamInfo) string {
+	if stream == nil {
+		return ""
+	}
+	if stream.SubChannelID != "" {
+		return stream.Title + "\x00" + stream.SubChannelID
+	}
+	return stream.Title
+}
+
 func EncodeSlug(stream *StreamInfo) string {
-	h := sha3.Sum224([]byte(stream.Title))
+	h := sha3.Sum224([]byte(slugInputKey(stream)))
 	slug := base64.RawURLEncoding.EncodeToString(h[:])
 
 	if err := storeSlugMapping(slug, stream); err != nil {

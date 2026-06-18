@@ -928,3 +928,184 @@ func TestProcessorRun_SynthesizesDiscoveredM3U8SourceIntoPlaylist(t *testing.T) 
 	}
 	assert.Equal(t, discoveredURL, loadedURL)
 }
+
+type detailedTestStream struct {
+	tvgID  string
+	chno   string
+	name   string
+	stream string
+}
+
+func parseM3UDetailed(content string) []detailedTestStream {
+	var streams []detailedTestStream
+	lines := strings.Split(content, "\n")
+	for index := 0; index < len(lines); index++ {
+		line := strings.TrimSpace(lines[index])
+		if !strings.HasPrefix(line, "#EXTINF") {
+			continue
+		}
+
+		entry := detailedTestStream{}
+		if match := regexp.MustCompile(`tvg-id="([^"]+)"`).FindStringSubmatch(line); len(match) > 1 {
+			entry.tvgID = match[1]
+		}
+		if match := regexp.MustCompile(`tvg-chno="([^"]+)"`).FindStringSubmatch(line); len(match) > 1 {
+			entry.chno = match[1]
+		}
+		if idx := strings.LastIndex(line, ","); idx != -1 {
+			entry.name = strings.TrimSpace(line[idx+1:])
+		}
+
+		for next := index + 1; next < len(lines); next++ {
+			candidate := strings.TrimSpace(lines[next])
+			if candidate == "" {
+				continue
+			}
+			if strings.HasPrefix(candidate, "#") {
+				break
+			}
+			entry.stream = candidate
+			index = next
+			break
+		}
+
+		streams = append(streams, entry)
+	}
+
+	return streams
+}
+
+func TestRestoreCompileStreamURLs_AfterShardRoundtrip(t *testing.T) {
+	cleanup := setupTestEnvironment(t)
+	defer cleanup()
+
+	manager := newSortingManager()
+	defer manager.Close()
+
+	first := parseLine(
+		`#EXTINF:-1 tvg-id="GSN" tvg-name="Game Show Network",Game Show Network`,
+		&LineDetails{Content: "http://example.com/gsn", LineNum: 1},
+		"1",
+	)
+	second := parseLine(
+		`#EXTINF:-1 tvg-id="gameshow.us" tvg-name="Game Show Network",Game Show Network`,
+		&LineDetails{Content: "http://example.com/sid", LineNum: 1},
+		"2",
+	)
+	require.NotNil(t, first)
+	require.NotNil(t, second)
+
+	require.NoError(t, manager.AddToSorter(first))
+	require.NoError(t, manager.AddToSorter(second))
+
+	var entries []*StreamInfo
+	require.NoError(t, manager.GetSortedEntries(func(stream *StreamInfo) {
+		entries = append(entries, stream)
+	}))
+	require.Len(t, entries, 1)
+
+	restored := entries[0]
+	if restored.URLs != nil {
+		require.Equal(t, 0, restored.URLs.Size(), "shard roundtrip should not preserve URL maps")
+	}
+
+	restoreCompileStreamURLs(restored)
+	require.Equal(t, 2, restored.URLs.Size(), "compile URL restore should reload both source indexes")
+	assert.True(t, streamHasSourceIndex(restored, "1"))
+	assert.True(t, streamHasSourceIndex(restored, "2"))
+}
+
+func TestProcessorRun_ChannelEPGMerge_EndToEndWithDirectSourceProxying(t *testing.T) {
+	originalConfig := config.GetConfig()
+	tempDir, err := os.MkdirTemp("", "channel-epg-merge-*")
+	require.NoError(t, err)
+
+	originalIncludeRegexes := includeRegexes
+	originalExcludeRegexes := excludeRegexes
+	originalRules := channelRules
+	originalMerges := channelMerges
+
+	config.SetConfig(&config.Config{
+		DataPath: filepath.Join(tempDir, "data"),
+		TempPath: filepath.Join(tempDir, "temp"),
+	})
+	utils.ResetCaches()
+	utils.SetDynamicSources(nil)
+	includeRegexes = nil
+	excludeRegexes = nil
+	channelRules = nil
+	channelMerges = nil
+	filterOnce = sync.Once{}
+
+	defer func() {
+		config.SetConfig(originalConfig)
+		utils.ResetCaches()
+		utils.SetDynamicSources(nil)
+		includeRegexes = originalIncludeRegexes
+		excludeRegexes = originalExcludeRegexes
+		channelRules = originalRules
+		channelMerges = originalMerges
+		filterOnce = sync.Once{}
+		_ = os.RemoveAll(tempDir)
+	}()
+
+	xmltv := `<?xml version="1.0" encoding="UTF-8"?><tv><channel id="gameshow.us"></channel></tv>`
+	epgServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = w.Write([]byte(xmltv))
+	}))
+	defer epgServer.Close()
+
+	require.NoError(t, os.MkdirAll(config.GetConfig().TempPath, 0755))
+
+	m3u1 := `#EXTM3U
+#EXTINF:-1 tvg-id="GSN" tvg-name="Game Show Network" group-title="Entertainment",Game Show Network
+http://example.com/gsn-stream
+`
+	m3u2 := `#EXTM3U
+#EXTINF:-1 tvg-id="gameshow.us" tvg-name="Game Show Network" group-title="Entertainment",Game Show Network
+http://example.com/sid-stream
+`
+
+	m3uPath1 := filepath.Join(config.GetConfig().TempPath, "gsn.m3u")
+	m3uPath2 := filepath.Join(config.GetConfig().TempPath, "sid.m3u")
+	require.NoError(t, os.WriteFile(m3uPath1, []byte(m3u1), 0644))
+	require.NoError(t, os.WriteFile(m3uPath2, []byte(m3u2), 0644))
+
+	t.Setenv("M3U_URL_1", fmt.Sprintf("file://%s", filepath.ToSlash(m3uPath1)))
+	t.Setenv("M3U_URL_2", fmt.Sprintf("file://%s", filepath.ToSlash(m3uPath2)))
+	t.Setenv("BASE_URL", "http://proxy.example.com")
+	t.Setenv("MERGE_EPG_FOR_SAME_CHANNEL_NUMBER", "true")
+	t.Setenv("EMBEDDED_EPG_URL", epgServer.URL)
+	t.Setenv("DIRECT_SOURCE_PROXYING", "true")
+	t.Setenv(
+		"CHANNEL_NUMBER_GROUP_1",
+		`{"number":64,"canonical":"Game Show Network","entries":[{"source_index":1,"channel_title":"Game Show Network","sub_number":"64.1"},{"source_index":2,"channel_title":"Game Show Network","sub_number":"64.2"}]}`,
+	)
+
+	processor := NewProcessor()
+	require.NotNil(t, processor)
+	require.NoError(t, processor.Run(context.Background(), httptest.NewRequest(http.MethodGet, "http://proxy.example.com", nil)))
+
+	content, err := os.ReadFile(processor.GetResultPath())
+	require.NoError(t, err)
+
+	streams := parseM3UDetailed(string(content))
+	var gsnRows []detailedTestStream
+	for _, stream := range streams {
+		if stream.name == "Game Show Network" {
+			gsnRows = append(gsnRows, stream)
+		}
+	}
+
+	require.Len(t, gsnRows, 2, "expected separate sub-channel rows, playlist:\n%s", string(content))
+	assert.Equal(t, "gameshow.us", gsnRows[0].tvgID)
+	assert.Equal(t, "gameshow.us", gsnRows[1].tvgID)
+	assert.ElementsMatch(t, []string{"64.1", "64.2"}, []string{gsnRows[0].chno, gsnRows[1].chno})
+	assert.ElementsMatch(
+		t,
+		[]string{"http://example.com/gsn-stream", "http://example.com/sid-stream"},
+		[]string{gsnRows[0].stream, gsnRows[1].stream},
+	)
+	assert.NotContains(t, string(content), "http://proxy.example.com/p/")
+}

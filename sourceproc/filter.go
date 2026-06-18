@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"unicode"
@@ -226,6 +227,52 @@ func loadStreamURLs(stream *StreamInfo, m3uIndex string) error {
 	}
 
 	return nil
+}
+
+func restoreCompileStreamURLs(stream *StreamInfo) {
+	if stream == nil {
+		return
+	}
+	if stream.URLs == nil {
+		stream.URLs = xsync.NewMapOf[string, map[string]string]()
+	}
+	if stream.URLs.Size() > 0 {
+		return
+	}
+
+	for _, m3uIndex := range utils.GetM3UIndexes() {
+		if err := loadStreamURLs(stream, m3uIndex); err != nil {
+			logger.Default.Debugf("restore compile URLs for %q source %s: %v", stream.Title, m3uIndex, err)
+		}
+	}
+
+	restoreStreamFallbackURL(stream)
+}
+
+func primarySourceURL(stream *StreamInfo, sourceIndex string) (string, int) {
+	if stream == nil || stream.URLs == nil {
+		return "", 0
+	}
+
+	inner, ok := stream.URLs.Load(sourceIndex)
+	if !ok || len(inner) == 0 {
+		return "", 0
+	}
+
+	for _, entry := range inner {
+		indexPart, urlPart, found := strings.Cut(entry, ":::")
+		if !found {
+			return strings.TrimSpace(entry), 0
+		}
+
+		sourceLine := 0
+		if parsed, err := strconv.Atoi(strings.TrimSpace(indexPart)); err == nil {
+			sourceLine = parsed
+		}
+		return strings.TrimSpace(urlPart), sourceLine
+	}
+
+	return "", 0
 }
 
 func compileRegexes(filters []string) []*regexp.Regexp {
