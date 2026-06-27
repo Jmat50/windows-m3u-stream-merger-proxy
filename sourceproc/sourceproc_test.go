@@ -660,6 +660,74 @@ func TestFormatStreamEntry_UsesSourceURLWhenDirectSourceProxyingEnabled(t *testi
 	assert.NotContains(t, entry, "http://proxy.example.com/p/")
 }
 
+func TestFormatStreamEntry_UsesSourceNameAsCategoryWhenGroupedBySource(t *testing.T) {
+	t.Setenv("M3U_URL_1", "http://example.com/1.m3u")
+	t.Setenv("M3U_NAME_1", "s.id")
+	t.Setenv("CATEGORIES_GROUPED_BY_SOURCE", "true")
+	utils.ResetCaches()
+
+	stream := &StreamInfo{
+		Title:     "A&E TV",
+		Group:     "Entertainment",
+		SourceM3U: "1",
+		SourceURL: "http://example-source.test/aetv",
+		URLs:      xsync.NewMapOf[string, map[string]string](),
+	}
+	stream.URLs.Store("1", map[string]string{
+		"hash": "1:::http://example-source.test/aetv",
+	})
+
+	entry := formatStreamEntry("http://proxy.example.com", stream)
+	assert.Contains(t, entry, `group-title="s.id"`)
+	assert.Contains(t, entry, `tvg-group="s.id"`)
+	assert.NotContains(t, entry, `group-title="Entertainment"`)
+}
+
+func TestFormatStreamEntry_KeepsSourceCategoryWithDirectProxyingAndGroupedBySource(t *testing.T) {
+	t.Setenv("M3U_URL_1", "http://example.com/1.m3u")
+	t.Setenv("M3U_NAME_1", "s.id")
+	t.Setenv("CATEGORIES_GROUPED_BY_SOURCE", "true")
+	t.Setenv("DIRECT_SOURCE_PROXYING", "true")
+	utils.ResetCaches()
+
+	stream := &StreamInfo{
+		Title:     "A&E TV",
+		Group:     "Entertainment",
+		SourceM3U: "1",
+		SourceURL: "http://example-source.test/aetv",
+		URLs:      xsync.NewMapOf[string, map[string]string](),
+	}
+	stream.URLs.Store("1", map[string]string{
+		"hash": "1:::http://example-source.test/aetv",
+	})
+
+	entry := formatStreamEntry("http://proxy.example.com", stream)
+	assert.Contains(t, entry, `group-title="s.id"`)
+	assert.Contains(t, entry, "\nhttp://example-source.test/aetv\n")
+	assert.NotContains(t, entry, `group-title="Entertainment"`)
+}
+
+func TestFormatStreamEntry_KeepsOriginalCategoryWhenGroupedBySourceDisabled(t *testing.T) {
+	t.Setenv("M3U_URL_1", "http://example.com/1.m3u")
+	t.Setenv("M3U_NAME_1", "s.id")
+	t.Setenv("CATEGORIES_GROUPED_BY_SOURCE", "false")
+	utils.ResetCaches()
+
+	stream := &StreamInfo{
+		Title:     "A&E TV",
+		Group:     "Entertainment",
+		SourceM3U: "1",
+		URLs:      xsync.NewMapOf[string, map[string]string](),
+	}
+	stream.URLs.Store("1", map[string]string{
+		"hash": "1:::http://example-source.test/aetv",
+	})
+
+	entry := formatStreamEntry("http://proxy.example.com", stream)
+	assert.Contains(t, entry, `group-title="Entertainment"`)
+	assert.NotContains(t, entry, `group-title="s.id"`)
+}
+
 func TestMergeStreamInfoAttributes_PrefersSourceLogoOverAutoRetrievedLogo(t *testing.T) {
 	cleanup := setupTestEnvironment(t)
 	defer cleanup()
@@ -1108,4 +1176,147 @@ http://example.com/sid-stream
 		[]string{gsnRows[0].stream, gsnRows[1].stream},
 	)
 	assert.NotContains(t, string(content), "http://proxy.example.com/p/")
+}
+
+func TestProcessorRun_RemovedSourceDoesNotLeakIntoChannelGroupExpansion(t *testing.T) {
+	originalConfig := config.GetConfig()
+	tempDir, err := os.MkdirTemp("", "removed-source-leak-*")
+	require.NoError(t, err)
+
+	originalIncludeRegexes := includeRegexes
+	originalExcludeRegexes := excludeRegexes
+	originalRules := channelRules
+	originalMerges := channelMerges
+
+	config.SetConfig(&config.Config{
+		DataPath: filepath.Join(tempDir, "data"),
+		TempPath: filepath.Join(tempDir, "temp"),
+	})
+	utils.ResetCaches()
+	utils.SetDynamicSources(nil)
+	includeRegexes = nil
+	excludeRegexes = nil
+	channelRules = nil
+	channelMerges = nil
+	filterOnce = sync.Once{}
+
+	defer func() {
+		config.SetConfig(originalConfig)
+		utils.ResetCaches()
+		utils.SetDynamicSources(nil)
+		includeRegexes = originalIncludeRegexes
+		excludeRegexes = originalExcludeRegexes
+		channelRules = originalRules
+		channelMerges = originalMerges
+		filterOnce = sync.Once{}
+		_ = os.RemoveAll(tempDir)
+	}()
+
+	xmltv := `<?xml version="1.0" encoding="UTF-8"?><tv><channel id="gameshow.us"></channel></tv>`
+	epgServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = w.Write([]byte(xmltv))
+	}))
+	defer epgServer.Close()
+
+	require.NoError(t, os.MkdirAll(config.GetConfig().TempPath, 0755))
+	sourcesDir := config.GetSourcesDirPath()
+	require.NoError(t, os.MkdirAll(sourcesDir, 0755))
+
+	m3u1 := `#EXTM3U
+#EXTINF:-1 tvg-id="gameshow.us" tvg-name="Game Show Network" group-title="Entertainment",Game Show Network
+http://example.com/gsn-stream
+`
+	m3uPath1 := filepath.Join(config.GetConfig().TempPath, "gsn.m3u")
+	require.NoError(t, os.WriteFile(m3uPath1, []byte(m3u1), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(sourcesDir, "1.m3u"), []byte(m3u1), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(sourcesDir, "2.m3u"), []byte(`#EXTM3U
+#EXTINF:-1 tvg-name="Removed Source",Removed Source
+http://example.com/stale-stream
+`), 0644))
+
+	t.Setenv("M3U_URL_1", fmt.Sprintf("file://%s", filepath.ToSlash(m3uPath1)))
+	t.Setenv("BASE_URL", "http://proxy.example.com")
+	t.Setenv("MERGE_EPG_FOR_SAME_CHANNEL_NUMBER", "true")
+	t.Setenv("EMBEDDED_EPG_URL", epgServer.URL)
+	t.Setenv("DIRECT_SOURCE_PROXYING", "true")
+	t.Setenv(
+		"CHANNEL_NUMBER_GROUP_1",
+		`{"number":64,"canonical":"Game Show Network","entries":[{"source_index":1,"channel_title":"Game Show Network","sub_number":"64.1"},{"source_index":2,"channel_title":"Game Show Network","sub_number":"64.2"}]}`,
+	)
+
+	processor := NewProcessor()
+	require.NotNil(t, processor)
+	require.NoError(t, processor.Run(context.Background(), httptest.NewRequest(http.MethodGet, "http://proxy.example.com", nil)))
+
+	content, err := os.ReadFile(processor.GetResultPath())
+	require.NoError(t, err)
+	assert.NotContains(t, string(content), "http://example.com/stale-stream")
+	assert.NotContains(t, string(content), `tvg-chno="64.2"`)
+	assert.Contains(t, string(content), `tvg-chno="64.1"`)
+	assert.Contains(t, string(content), "http://example.com/gsn-stream")
+}
+
+func TestPruneStreamToConfiguredSourcesRemovesStaleSourceIndexes(t *testing.T) {
+	utils.ResetCaches()
+	t.Setenv("M3U_URL_1", "http://example.com/one.m3u")
+	defer utils.ResetCaches()
+
+	stream := &StreamInfo{
+		Title:     "Game Show Network",
+		SourceM3U: "2",
+		URLs:      xsync.NewMapOf[string, map[string]string](),
+	}
+	stream.URLs.Store("1", map[string]string{"0": "0:::http://example.com/gsn"})
+	stream.URLs.Store("2", map[string]string{"0": "0:::http://example.com/stale"})
+	stream.SourceEPGMeta = map[string]SourceEPGMeta{
+		"1": {TvgID: "gameshow.us"},
+		"2": {TvgID: "stale.us"},
+	}
+
+	pruneStreamToConfiguredSources(stream)
+
+	assert.True(t, streamHasSourceIndex(stream, "1"))
+	assert.False(t, streamHasSourceIndex(stream, "2"))
+	assert.Equal(t, "1", stream.SourceM3U)
+	assert.Equal(t, "gameshow.us", stream.SourceEPGMeta["1"].TvgID)
+	_, hasStale := stream.SourceEPGMeta["2"]
+	assert.False(t, hasStale)
+}
+
+func TestCleanupOrphanedSourceCachesRemovesUnusedIndexes(t *testing.T) {
+	originalConfig := config.GetConfig()
+	tempDir, err := os.MkdirTemp("", "source-cache-cleanup-*")
+	require.NoError(t, err)
+
+	config.SetConfig(&config.Config{
+		DataPath: filepath.Join(tempDir, "data"),
+		TempPath: filepath.Join(tempDir, "temp"),
+	})
+	utils.ResetCaches()
+	t.Setenv("M3U_URL_1", "http://example.com/one.m3u")
+
+	defer func() {
+		config.SetConfig(originalConfig)
+		utils.ResetCaches()
+		_ = os.RemoveAll(tempDir)
+	}()
+
+	sourcesDir := config.GetSourcesDirPath()
+	require.NoError(t, os.MkdirAll(sourcesDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(sourcesDir, "1.m3u"), []byte("#EXTM3U\n"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(sourcesDir, "2.m3u"), []byte("#EXTM3U\n"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(sourcesDir, "2.m3u.new"), []byte("#EXTM3U\n"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(sourcesDir, "DISC_OLD.m3u"), []byte("#EXTM3U\n"), 0644))
+
+	cleanupOrphanedSourceCaches()
+
+	_, err = os.Stat(filepath.Join(sourcesDir, "1.m3u"))
+	require.NoError(t, err)
+	_, err = os.Stat(filepath.Join(sourcesDir, "2.m3u"))
+	require.Error(t, err)
+	_, err = os.Stat(filepath.Join(sourcesDir, "2.m3u.new"))
+	require.Error(t, err)
+	_, err = os.Stat(filepath.Join(sourcesDir, "DISC_OLD.m3u"))
+	require.Error(t, err)
 }

@@ -272,6 +272,9 @@ func TestPublishDynamicSourcesLockedHonorsDiscoveredSourceOverrides(t *testing.T
 	utils.ResetCaches()
 	defer utils.ResetCaches()
 
+	t.Setenv("DISCOVERED_SOURCE_CONFIG_1", `{"index":"DISC_1_BBBB","enabled":false}`)
+	t.Setenv("DISCOVERED_SOURCE_CONFIG_2", `{"index":"DISC_2_CCCC","name":"Custom C","enabled":true}`)
+
 	manager := &Manager{
 		jobs: []Job{
 			{ID: "1", Name: "Job One"},
@@ -286,17 +289,7 @@ func TestPublishDynamicSourcesLockedHonorsDiscoveredSourceOverrides(t *testing.T
 				{Index: "DISC_2_CCCC", URL: "https://example.com/c.m3u8", Group: "Job Two"},
 			},
 		},
-		sourceOverrides: map[string]discoveredSourceOverride{
-			"DISC_1_BBBB": {
-				Index:   "DISC_1_BBBB",
-				Enabled: false,
-			},
-			"DISC_2_CCCC": {
-				Index:   "DISC_2_CCCC",
-				Name:    "Custom C",
-				Enabled: true,
-			},
-		},
+		sourceOverrides: map[string]discoveredSourceOverride{},
 	}
 
 	manager.publishDynamicSourcesLocked()
@@ -334,5 +327,44 @@ func TestPublishDynamicSourcesLockedHonorsDiscoveredSourceOverrides(t *testing.T
 	}
 	if !enabledByIndex["DISC_2_CCCC"] {
 		t.Fatal("DISC_2_CCCC should remain enabled")
+	}
+}
+
+func TestPruneStaleJobDataLockedRemovesRemovedJobSources(t *testing.T) {
+	manager := &Manager{
+		jobs: []Job{
+			{ID: "keep", Name: "Keep"},
+		},
+		sourcesByJob: map[string][]utils.SourceConfig{
+			"keep": {
+				{Index: "DISC_KEEP_AAAA", URL: "https://example.com/a.m3u8"},
+			},
+			"removed": {
+				{Index: "DISC_REMOVED_BBBB", URL: "https://example.com/b.m3u8"},
+			},
+		},
+		hashByJob: map[string]string{
+			"keep":    "hash-a",
+			"removed": "hash-b",
+		},
+		sourceOverrides: map[string]discoveredSourceOverride{
+			"DISC_KEEP_AAAA":    {Index: "DISC_KEEP_AAAA", Enabled: true},
+			"DISC_REMOVED_BBBB": {Index: "DISC_REMOVED_BBBB", Enabled: true},
+		},
+	}
+
+	manager.pruneStaleJobDataLocked()
+
+	if _, ok := manager.sourcesByJob["removed"]; ok {
+		t.Fatal("expected removed job sources to be pruned")
+	}
+	if _, ok := manager.hashByJob["removed"]; ok {
+		t.Fatal("expected removed job hash to be pruned")
+	}
+	if _, ok := manager.sourceOverrides["DISC_REMOVED_BBBB"]; ok {
+		t.Fatal("expected override for removed job source to be pruned")
+	}
+	if _, ok := manager.sourceOverrides["DISC_KEEP_AAAA"]; !ok {
+		t.Fatal("expected override for active job source to remain")
 	}
 }

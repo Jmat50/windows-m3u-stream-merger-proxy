@@ -60,6 +60,7 @@ DEFAULT_SETTINGS = {
     "retry_wait": "0",
     "stream_timeout": "7",
     "auto_retrieve_channel_icons": False,
+    "categories_grouped_by_source": False,
     "direct_source_proxying": False,
     "embedded_epg_enabled": False,
     "embedded_epg_urls": [],
@@ -289,6 +290,7 @@ class DesktopApp(tk.Tk):
         self.retry_wait_var = tk.StringVar()
         self.stream_timeout_var = tk.StringVar()
         self.auto_retrieve_channel_icons_var = tk.BooleanVar()
+        self.categories_grouped_by_source_var = tk.BooleanVar()
         self.direct_source_proxying_var = tk.BooleanVar()
         self.embedded_epg_urls: list[str] = []
         self.source_name_var = tk.StringVar()
@@ -751,6 +753,9 @@ class DesktopApp(tk.Tk):
         self.auto_retrieve_channel_icons_var.set(
             bool(settings.get("auto_retrieve_channel_icons", DEFAULT_SETTINGS["auto_retrieve_channel_icons"]))
         )
+        self.categories_grouped_by_source_var.set(
+            bool(settings.get("categories_grouped_by_source", DEFAULT_SETTINGS["categories_grouped_by_source"]))
+        )
         self.direct_source_proxying_var.set(
             bool(settings.get("direct_source_proxying", DEFAULT_SETTINGS["direct_source_proxying"]))
         )
@@ -770,7 +775,7 @@ class DesktopApp(tk.Tk):
         self.discovered_channels_config = self._normalize_discovered_channels_config(
             settings.get("discovered_channels_config", [])
         )
-        self._ensure_web_discovery_job_sources()
+        self._sync_web_discovery_job_sources()
         self._refresh_sources_tree()
         self._clear_source_editor()
         self.include_title_filters = self._normalize_filter_list(settings.get("include_title_filters"))
@@ -778,15 +783,72 @@ class DesktopApp(tk.Tk):
         self.channel_source_rules = self._normalize_channel_source_rules(settings.get("channel_source_rules"))
         self.channel_merge_rules = self._normalize_channel_merge_rules(settings.get("channel_merge_rules"))
 
-    def _ensure_web_discovery_job_sources(self) -> None:
-        existing_urls = {str(source.get("url", "")).strip() for source in self.sources_items if str(source.get("url", "")).strip()}
+    def _discovery_job_id(self, item: dict[str, object], index: int) -> str:
+        existing = str(item.get("id", "")).strip()
+        if existing:
+            return existing
+
+        start_url = str(item.get("start_url", "")).strip().lower()
+        if start_url:
+            digest = hashlib.sha1(start_url.encode("utf-8")).hexdigest()[:8]
+            return f"job-{digest}"
+
+        return f"job-{index}"
+
+    def _active_discovery_job_ids(self) -> set[str]:
+        return {
+            self._discovery_job_id(job, index)
+            for index, job in enumerate(self.web_discovery_jobs, start=1)
+            if isinstance(job, dict)
+        }
+
+    def _discovered_source_belongs_to_active_jobs(self, source_index: str, active_job_ids: set[str]) -> bool:
+        source_index = str(source_index).strip()
+        if not source_index.upper().startswith("DISC_"):
+            return True
+
+        parts = source_index.split("_")
+        if len(parts) < 3:
+            return False
+
+        return parts[1].upper() in {job_id.upper() for job_id in active_job_ids}
+
+    def _prune_discovered_channels_config(self) -> None:
+        active_job_ids = self._active_discovery_job_ids()
+        self.discovered_channels_config = [
+            config
+            for config in self._normalize_discovered_channels_config(self.discovered_channels_config)
+            if self._discovered_source_belongs_to_active_jobs(str(config.get("index", "")), active_job_ids)
+        ]
+
+    def _sync_web_discovery_job_sources(self) -> None:
+        active_start_urls = {
+            str(job.get("start_url", "")).strip()
+            for job in self.web_discovery_jobs
+            if str(job.get("start_url", "")).strip()
+        }
         changed = False
+
+        kept_sources: list[dict[str, object]] = []
+        for source in self.sources_items:
+            if source.get("_web_discovery_job"):
+                source_url = str(source.get("url", "")).strip()
+                if source_url not in active_start_urls:
+                    changed = True
+                    continue
+            kept_sources.append(source)
+        if changed:
+            self.sources_items = kept_sources
+
+        existing_urls = {
+            str(source.get("url", "")).strip()
+            for source in self.sources_items
+            if str(source.get("url", "")).strip()
+        }
 
         for job in self.web_discovery_jobs:
             start_url = str(job.get("start_url", "")).strip()
-            if not start_url:
-                continue
-            if start_url in existing_urls:
+            if not start_url or start_url in existing_urls:
                 continue
 
             raw_name = str(job.get("name", "")).strip() or f"Web Discovery {len(self.sources_items) + 1}"
@@ -808,7 +870,7 @@ class DesktopApp(tk.Tk):
             changed = True
 
         if changed:
-            self._set_last_event("Added a placeholder source for each web discovery job.")
+            self._set_last_event("Synchronized web discovery placeholder sources with configured jobs.")
 
     def _reset_settings_to_defaults_clicked(self) -> None:
         self._apply_settings_to_ui(DEFAULT_SETTINGS)
@@ -947,6 +1009,7 @@ class DesktopApp(tk.Tk):
 
             output.append(
                 {
+                    "id": self._discovery_job_id(item, index),
                     "name": str(item.get("name", "")).strip() or f"Web Discovery {index}",
                     "start_url": start_url,
                     "scan_interval_minutes": _positive_int(item.get("scan_interval_minutes", 60), 60),
@@ -1802,7 +1865,8 @@ class DesktopApp(tk.Tk):
 
         def save_popup_settings() -> None:
             self.web_discovery_jobs = self._normalize_web_discovery_jobs(jobs)
-            self._ensure_web_discovery_job_sources()
+            self._prune_discovered_channels_config()
+            self._sync_web_discovery_job_sources()
             self._refresh_sources_tree()
             try:
                 settings = self._collect_settings()
@@ -2199,6 +2263,7 @@ class DesktopApp(tk.Tk):
 
         channel_status_var = tk.StringVar(value="Click Refresh Channels to load channels from all sources.")
         auto_retrieve_channel_icons_var = tk.BooleanVar(value=bool(self.auto_retrieve_channel_icons_var.get()))
+        categories_grouped_by_source_var = tk.BooleanVar(value=bool(self.categories_grouped_by_source_var.get()))
 
         channel_row = ttk.Frame(root)
         channel_row.grid(row=0, column=0, sticky="ew")
@@ -2210,11 +2275,16 @@ class DesktopApp(tk.Tk):
         ).grid(row=0, column=0, sticky="w")
         ttk.Checkbutton(
             channel_row,
+            text="Make Categories Grouped by Source",
+            variable=categories_grouped_by_source_var,
+        ).grid(row=0, column=1, sticky="e", padx=(12, 8))
+        ttk.Checkbutton(
+            channel_row,
             text="Retrieve Missing Channel Icons",
             variable=auto_retrieve_channel_icons_var,
-        ).grid(row=0, column=1, sticky="e", padx=(12, 8))
+        ).grid(row=0, column=2, sticky="e", padx=(0, 8))
         refresh_channels_button = ttk.Button(channel_row, text="Refresh Channels")
-        refresh_channels_button.grid(row=0, column=2, sticky="e")
+        refresh_channels_button.grid(row=0, column=3, sticky="e")
 
         ttk.Label(root, textvariable=channel_status_var, foreground="#4f4f4f").grid(
             row=1, column=0, sticky="w", pady=(8, 8)
@@ -3025,6 +3095,7 @@ class DesktopApp(tk.Tk):
             ]
 
             self.auto_retrieve_channel_icons_var.set(bool(auto_retrieve_channel_icons_var.get()))
+            self.categories_grouped_by_source_var.set(bool(categories_grouped_by_source_var.get()))
             self.include_title_filters = include_patterns + include_unmapped_filters
             self.exclude_title_filters = exclude_patterns + exclude_unmapped_filters
             # Source assignment in this dialog is now automatic, so clear manual channel-source rules.
@@ -3389,6 +3460,7 @@ class DesktopApp(tk.Tk):
                 return
 
             self._append_log("[APP] Discovered channels configuration saved.")
+            self._restart_server_if_running("Discovered channels configuration changed.")
             popup.destroy()
 
         footer_buttons = ttk.Frame(footer)
@@ -3457,6 +3529,7 @@ class DesktopApp(tk.Tk):
             "retry_wait": retry_wait,
             "stream_timeout": stream_timeout,
             "auto_retrieve_channel_icons": bool(self.auto_retrieve_channel_icons_var.get()),
+            "categories_grouped_by_source": bool(self.categories_grouped_by_source_var.get()),
             "direct_source_proxying": bool(self.direct_source_proxying_var.get()),
             "embedded_epg_enabled": bool(self.embedded_epg_enabled_var.get()),
             "embedded_epg_urls": (
@@ -4077,6 +4150,7 @@ class DesktopApp(tk.Tk):
         for key in list(env):
             if (
                 key.startswith("M3U_URL_")
+                or key.startswith("M3U_NAME_")
                 or key.startswith("M3U_MAX_CONCURRENCY_")
                 or key.startswith("M3U_CONTAINS_VOD_")
                 or key.startswith("INCLUDE_TITLE_")
@@ -4089,6 +4163,7 @@ class DesktopApp(tk.Tk):
             ):
                 env.pop(key, None)
         env.pop("AUTO_RETRIEVE_CHANNEL_ICONS", None)
+        env.pop("CATEGORIES_GROUPED_BY_SOURCE", None)
         env.pop("DIRECT_SOURCE_PROXYING", None)
         env.pop("EMBEDDED_EPG_URL", None)
         env.pop("MERGE_EPG_FOR_SAME_CHANNEL_NUMBER", None)
@@ -4106,6 +4181,9 @@ class DesktopApp(tk.Tk):
         env["SHARED_BUFFER"] = _to_bool_env(settings.get("shared_buffer", DEFAULT_SETTINGS["shared_buffer"]))
         env["AUTO_RETRIEVE_CHANNEL_ICONS"] = _to_bool_env(
             bool(settings.get("auto_retrieve_channel_icons", DEFAULT_SETTINGS["auto_retrieve_channel_icons"]))
+        )
+        env["CATEGORIES_GROUPED_BY_SOURCE"] = _to_bool_env(
+            bool(settings.get("categories_grouped_by_source", DEFAULT_SETTINGS["categories_grouped_by_source"]))
         )
         env["DIRECT_SOURCE_PROXYING"] = _to_bool_env(
             bool(settings.get("direct_source_proxying", DEFAULT_SETTINGS["direct_source_proxying"]))
@@ -4135,6 +4213,9 @@ class DesktopApp(tk.Tk):
                 concurrency = "1"
 
             env[f"M3U_URL_{index}"] = source_url
+            source_name = str(source.get("name", "")).strip()
+            if source_name:
+                env[f"M3U_NAME_{index}"] = source_name
             env[f"M3U_MAX_CONCURRENCY_{index}"] = concurrency
             env[f"M3U_CONTAINS_VOD_{index}"] = _to_bool_env(bool(source.get("contains_vod", True)))
 

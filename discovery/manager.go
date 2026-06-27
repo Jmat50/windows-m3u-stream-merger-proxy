@@ -70,6 +70,7 @@ type Manager struct {
 	sourcesByJob    map[string][]utils.SourceConfig
 	hashByJob       map[string]string
 	sourceOverrides map[string]discoveredSourceOverride
+	jobCancels      map[string]context.CancelFunc
 }
 
 type discoveredSourceOverride struct {
@@ -106,20 +107,21 @@ func Initialize(ctx context.Context, log logger.Logger, onSourcesChanged func())
 		sourcesByJob:     make(map[string][]utils.SourceConfig, len(jobs)),
 		hashByJob:        make(map[string]string, len(jobs)),
 		sourceOverrides:  loadSourceOverridesFromEnv(),
+		jobCancels:       make(map[string]context.CancelFunc, len(jobs)),
 	}
 
 	utils.SetDynamicSources(nil)
 	if len(jobs) == 0 {
+		manager.mu.Lock()
+		manager.pruneStaleJobDataLocked()
+		manager.publishDynamicSourcesLocked()
+		manager.mu.Unlock()
 		return manager, nil
 	}
 
 	manager.logger.Logf("[DISCOVERY] Loaded %d web discovery job(s).", len(jobs))
 	manager.refreshAll(ctx, true)
-
-	for _, job := range jobs {
-		job := job
-		go manager.runJobLoop(ctx, job)
-	}
+	manager.startJobLoops(ctx, jobs)
 
 	return manager, nil
 }
@@ -241,6 +243,76 @@ func (m *Manager) runJobLoop(ctx context.Context, job Job) {
 	}
 }
 
+func (m *Manager) startJobLoops(parent context.Context, jobs []Job) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	active := make(map[string]struct{}, len(jobs))
+	for _, job := range jobs {
+		active[job.ID] = struct{}{}
+		if _, running := m.jobCancels[job.ID]; running {
+			continue
+		}
+
+		jobCtx, cancel := context.WithCancel(parent)
+		m.jobCancels[job.ID] = cancel
+		loopJob := job
+		go m.runJobLoop(jobCtx, loopJob)
+	}
+
+	for jobID, cancel := range m.jobCancels {
+		if _, ok := active[jobID]; ok {
+			continue
+		}
+		cancel()
+		delete(m.jobCancels, jobID)
+	}
+}
+
+func (m *Manager) pruneStaleJobDataLocked() {
+	active := make(map[string]struct{}, len(m.jobs))
+	for _, job := range m.jobs {
+		active[job.ID] = struct{}{}
+	}
+
+	for jobID := range m.sourcesByJob {
+		if _, ok := active[jobID]; !ok {
+			delete(m.sourcesByJob, jobID)
+		}
+	}
+	for jobID := range m.hashByJob {
+		if _, ok := active[jobID]; !ok {
+			delete(m.hashByJob, jobID)
+		}
+	}
+
+	activeJobIDs := make(map[string]struct{}, len(m.jobs))
+	for _, job := range m.jobs {
+		activeJobIDs[strings.ToUpper(strings.TrimSpace(job.ID))] = struct{}{}
+	}
+	for index := range m.sourceOverrides {
+		if !discoveredSourceIndexBelongsToActiveJobs(index, activeJobIDs) {
+			delete(m.sourceOverrides, index)
+		}
+	}
+}
+
+func discoveredSourceIndexBelongsToActiveJobs(index string, activeJobIDs map[string]struct{}) bool {
+	index = strings.TrimSpace(index)
+	if !strings.HasPrefix(strings.ToUpper(index), "DISC_") {
+		return true
+	}
+
+	parts := strings.Split(index, "_")
+	if len(parts) < 3 {
+		return false
+	}
+
+	jobID := strings.ToUpper(strings.TrimSpace(parts[1]))
+	_, ok := activeJobIDs[jobID]
+	return ok
+}
+
 func (m *Manager) refreshAll(ctx context.Context, triggerUpdates bool) {
 	changed := false
 	for _, job := range m.jobs {
@@ -306,6 +378,9 @@ func (m *Manager) refreshJob(ctx context.Context, job Job) (bool, error) {
 }
 
 func (m *Manager) publishDynamicSourcesLocked() {
+	m.sourceOverrides = loadSourceOverridesFromEnv()
+	m.pruneStaleJobDataLocked()
+
 	combined := make([]utils.SourceConfig, 0)
 	for _, job := range m.jobs {
 		for _, source := range m.sourcesByJob[job.ID] {

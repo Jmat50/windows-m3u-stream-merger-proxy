@@ -146,6 +146,7 @@ func (p *M3UProcessor) processStreams(r *http.Request) chan error {
 		p.revalidatingDone = make(chan struct{})
 	}
 
+	cleanupOrphanedSourceCaches()
 	results := streamDownloadM3USources()
 	baseURL := utils.DetermineBaseURL(r)
 

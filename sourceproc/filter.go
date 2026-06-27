@@ -237,6 +237,7 @@ func restoreCompileStreamURLs(stream *StreamInfo) {
 		stream.URLs = xsync.NewMapOf[string, map[string]string]()
 	}
 	if stream.URLs.Size() > 0 {
+		pruneStreamToConfiguredSources(stream)
 		return
 	}
 
@@ -246,7 +247,75 @@ func restoreCompileStreamURLs(stream *StreamInfo) {
 		}
 	}
 
+	pruneStreamToConfiguredSources(stream)
 	restoreStreamFallbackURL(stream)
+}
+
+func pruneStreamToConfiguredSources(stream *StreamInfo) {
+	if stream == nil || stream.URLs == nil {
+		return
+	}
+
+	configured := make(map[string]struct{})
+	for _, index := range utils.GetM3UIndexes() {
+		configured[index] = struct{}{}
+	}
+
+	stream.URLs.Range(func(key string, _ map[string]string) bool {
+		if _, ok := configured[key]; !ok {
+			stream.URLs.Delete(key)
+		}
+		return true
+	})
+
+	if stream.SourceEPGMeta != nil {
+		for sourceIndex := range stream.SourceEPGMeta {
+			if _, ok := configured[sourceIndex]; !ok {
+				delete(stream.SourceEPGMeta, sourceIndex)
+			}
+		}
+		if len(stream.SourceEPGMeta) == 0 {
+			stream.SourceEPGMeta = nil
+		}
+	}
+
+	if stream.SourceM3U != "" {
+		if _, ok := configured[stream.SourceM3U]; !ok {
+			stream.SourceM3U = ""
+			stream.SourceIndex = 0
+			stream.SourceURL = ""
+		}
+	}
+
+	if stream.URLs.Size() == 0 {
+		return
+	}
+
+	if stream.SourceM3U == "" {
+		var bestIndex string
+		var bestLine int
+		stream.URLs.Range(func(sourceIndex string, inner map[string]string) bool {
+			for _, entry := range inner {
+				line := 0
+				indexPart, _, found := strings.Cut(entry, ":::")
+				if found {
+					if parsed, err := strconv.Atoi(strings.TrimSpace(indexPart)); err == nil {
+						line = parsed
+					}
+				}
+				if bestIndex == "" || lessSourceIndex(sourceIndex, bestIndex) || (sourceIndex == bestIndex && line < bestLine) {
+					bestIndex = sourceIndex
+					bestLine = line
+				}
+				break
+			}
+			return true
+		})
+		if bestIndex != "" {
+			stream.SourceM3U = bestIndex
+			stream.SourceURL, stream.SourceIndex = primarySourceURL(stream, bestIndex)
+		}
+	}
 }
 
 func primarySourceURL(stream *StreamInfo, sourceIndex string) (string, int) {

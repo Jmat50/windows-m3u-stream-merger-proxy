@@ -92,6 +92,30 @@ func TestGetSourceConfigs_ReadsContainsVODOverride(t *testing.T) {
 	}
 }
 
+func TestGetSourceConfigs_ReadsSourceName(t *testing.T) {
+	ResetCaches()
+	defer ResetCaches()
+
+	_ = os.Unsetenv("M3U_URL_1")
+	_ = os.Unsetenv("M3U_NAME_1")
+	defer func() {
+		_ = os.Unsetenv("M3U_URL_1")
+		_ = os.Unsetenv("M3U_NAME_1")
+	}()
+
+	_ = os.Setenv("M3U_URL_1", "http://example.com/playlist.m3u")
+	_ = os.Setenv("M3U_NAME_1", "s.id")
+
+	sources := GetSourceConfigs()
+	if len(sources) != 1 {
+		t.Fatalf("GetSourceConfigs() length = %d, want 1 (%v)", len(sources), sources)
+	}
+
+	if sources[0].Name != "s.id" {
+		t.Fatalf("GetSourceConfigs()[0].Name = %q, want s.id", sources[0].Name)
+	}
+}
+
 func TestGetEnvHttpAcceptIncludesPlaylistTypes(t *testing.T) {
 	_ = os.Unsetenv("HTTP_ACCEPT")
 

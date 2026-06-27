@@ -160,9 +160,9 @@ func formatStreamEntry(baseURL string, stream *StreamInfo) string {
 	if stream.LogoURL != "" {
 		extInfTags = append(extInfTags, fmt.Sprintf("tvg-logo=\"%s\"", stream.LogoURL))
 	}
-	if stream.Group != "" {
-		extInfTags = append(extInfTags, fmt.Sprintf("tvg-group=\"%s\"", stream.Group))
-		extInfTags = append(extInfTags, fmt.Sprintf("group-title=\"%s\"", stream.Group))
+	if groupTitle := streamGroupForOutput(stream); groupTitle != "" {
+		extInfTags = append(extInfTags, fmt.Sprintf("tvg-group=\"%s\"", groupTitle))
+		extInfTags = append(extInfTags, fmt.Sprintf("group-title=\"%s\"", groupTitle))
 	}
 	if stream.TvgType != "" {
 		extInfTags = append(extInfTags, fmt.Sprintf("tvg-type=\"%s\"", stream.TvgType))

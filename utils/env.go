@@ -198,10 +198,12 @@ func loadStaticSources() []SourceConfig {
 			}
 		}
 
+		name := strings.TrimSpace(os.Getenv(fmt.Sprintf("M3U_NAME_%s", indexString)))
+
 		sources = append(sources, SourceConfig{
 			Index:          indexString,
 			URL:            url,
-			Name:           "",
+			Name:           name,
 			Group:          "",
 			MaxConcurrency: maxConcurrency,
 			ContainsVOD:    containsVOD,

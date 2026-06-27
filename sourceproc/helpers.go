@@ -3,6 +3,7 @@ package sourceproc
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -15,7 +16,10 @@ import (
 	"github.com/puzpuzpuz/xsync/v3"
 )
 
-const directSourceProxyingEnv = "DIRECT_SOURCE_PROXYING"
+const (
+	directSourceProxyingEnv         = "DIRECT_SOURCE_PROXYING"
+	categoriesGroupedBySourceEnv    = "CATEGORIES_GROUPED_BY_SOURCE"
+)
 
 func GetStreamBySlug(slug string) (*StreamInfo, error) {
 	var err error
@@ -117,6 +121,43 @@ func ClearProcessedM3Us() {
 	}
 }
 
+func cleanupOrphanedSourceCaches() {
+	dir := config.GetSourcesDirPath()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			logger.Default.Warnf("Unable to scan source cache directory %s: %v", dir, err)
+		}
+		return
+	}
+
+	active := make(map[string]struct{}, len(utils.GetM3UIndexes()))
+	for _, index := range utils.GetM3UIndexes() {
+		active[index] = struct{}{}
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		name := entry.Name()
+		index := strings.TrimSuffix(name, ".new")
+		index = strings.TrimSuffix(index, ".m3u")
+		if index == name {
+			continue
+		}
+		if _, ok := active[index]; ok {
+			continue
+		}
+
+		filePath := filepath.Join(dir, name)
+		if removeErr := os.Remove(filePath); removeErr != nil && !os.IsNotExist(removeErr) {
+			logger.Default.Warnf("Unable to remove orphaned source cache %s: %v", filePath, removeErr)
+		}
+	}
+}
+
 func directSourceProxyingEnabled() bool {
 	rawValue := strings.TrimSpace(os.Getenv(directSourceProxyingEnv))
 	enabled, err := strconv.ParseBool(rawValue)
@@ -124,5 +165,76 @@ func directSourceProxyingEnabled() bool {
 		return false
 	}
 	return enabled
+}
+
+func categoriesGroupedBySourceEnabled() bool {
+	rawValue := strings.TrimSpace(os.Getenv(categoriesGroupedBySourceEnv))
+	enabled, err := strconv.ParseBool(rawValue)
+	if err != nil {
+		return false
+	}
+	return enabled
+}
+
+func sourceDisplayName(sourceIndex string) string {
+	sourceIndex = strings.TrimSpace(sourceIndex)
+	if sourceIndex == "" {
+		return ""
+	}
+
+	if sourceConfig, ok := utils.GetSourceConfig(sourceIndex); ok {
+		if name := strings.TrimSpace(sourceConfig.Name); name != "" {
+			return name
+		}
+	}
+
+	if num, err := strconv.Atoi(sourceIndex); err == nil {
+		return fmt.Sprintf("Source %d", num)
+	}
+
+	return sourceIndex
+}
+
+func streamSourceIndex(stream *StreamInfo) string {
+	if stream == nil {
+		return ""
+	}
+
+	if sourceIndex := strings.TrimSpace(stream.SourceM3U); sourceIndex != "" {
+		return sourceIndex
+	}
+
+	if stream.URLs == nil || stream.URLs.Size() == 0 {
+		return ""
+	}
+
+	var bestIndex string
+	stream.URLs.Range(func(sourceIndex string, inner map[string]string) bool {
+		if len(inner) == 0 {
+			return true
+		}
+		if bestIndex == "" || lessSourceIndex(sourceIndex, bestIndex) {
+			bestIndex = sourceIndex
+		}
+		return true
+	})
+
+	return bestIndex
+}
+
+func streamGroupForOutput(stream *StreamInfo) string {
+	if stream == nil {
+		return ""
+	}
+
+	if !categoriesGroupedBySourceEnabled() {
+		return stream.Group
+	}
+
+	if name := sourceDisplayName(streamSourceIndex(stream)); name != "" {
+		return name
+	}
+
+	return stream.Group
 }
 

@@ -37,6 +37,9 @@ func newSortingManager() *SortingManager {
 	sortingDir := strings.ToLower(os.Getenv("SORTING_DIRECTION"))
 	basePath := config.GetSortDirPath()
 
+	if err := os.RemoveAll(basePath); err != nil {
+		logger.Default.Warnf("Unable to reset sorting directory %s: %v", basePath, err)
+	}
 	if err := os.MkdirAll(basePath, 0755); err != nil {
 		logger.Default.Error(err.Error())
 	}
